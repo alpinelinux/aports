@@ -1,9 +1,9 @@
 Patch-Source: https://github.com/freeunitorg/freeunit/issues/665
 Router fix for a request claimed by a worker that dies before
-REQ_HEADERS_ACK (v2, not committed upstream yet).
+REQ_HEADERS_ACK (v3, not committed upstream yet).
 
 diff --git a/CHANGES b/CHANGES
-index 368f6745..ab7f7204 100644
+index 368f6745..057aaab5 100644
 --- a/CHANGES
 +++ b/CHANGES
 @@ -18,6 +18,14 @@ Changes with FreeUnit 1.37.2                                     31 Oct 2026
@@ -14,15 +14,15 @@ index 368f6745..ab7f7204 100644
 +       application and did not acknowledge before it died was never
 +       answered without "limits": {"timeout"}. It also kept the application
 +       and its listener, so a later configuration on the same port failed
-+       with "Address already in use". The router now answers such a request
-+       with 503: at once if no worker claimed it, and 5 seconds after the
-+       exit if a worker claimed it.
++       with "Address already in use". The router now waits 5 seconds after
++       the exit for a worker to acknowledge such a request, and then
++       answers 503.
 +
      *) Feature: the PHP module now builds with PHP 8.7, which removed five
         members of "sapi_module_struct". The module names the members that it
         sets, so a member that PHP removes no longer shifts the others.
 diff --git a/src/nxt_app_queue.h b/src/nxt_app_queue.h
-index 122322df..81032881 100644
+index 122322df..1fd6c9aa 100644
 --- a/src/nxt_app_queue.h
 +++ b/src/nxt_app_queue.h
 @@ -78,10 +78,15 @@ nxt_app_queue_notify_decision(int32_t pos, uint32_t depth_bound)
@@ -71,10 +71,22 @@ index 122322df..81032881 100644
  nxt_inline nxt_int_t
  nxt_app_queue_send(nxt_app_queue_t volatile *q, const void *p,
      uint8_t size, uint32_t tracking, int *notify, uint32_t *cookie)
-@@ -177,6 +196,20 @@ nxt_app_queue_cancel(nxt_app_queue_t volatile *q, uint32_t cookie,
+@@ -177,6 +196,32 @@ nxt_app_queue_cancel(nxt_app_queue_t volatile *q, uint32_t cookie,
  }
  
  
++/*
++ * The tracking word of an item, read without a change.  A reader that claims
++ * the item changes the word (nxt_unit_app_queue_recv()).
++ */
++
++nxt_inline uint32_t
++nxt_app_queue_tracking(nxt_app_queue_t volatile *q, uint32_t cookie)
++{
++    return nxt_atomic_load(&q->items[cookie].tracking);
++}
++
++
 +/*
 + * Answers whether a reader dequeued the item that nxt_app_queue_send_at() put
 + * at position "qpos".  The head passes the positions in order, one for each
@@ -124,7 +136,7 @@ index 183830e5..1fbb8d97 100644
  
      nxt_conn_t                 *free_connections;
 diff --git a/src/nxt_router.c b/src/nxt_router.c
-index ea77bedd..4945a138 100644
+index ea77bedd..4e70aadf 100644
 --- a/src/nxt_router.c
 +++ b/src/nxt_router.c
 @@ -417,6 +417,9 @@ static nxt_buf_t *nxt_router_prepare_msg(nxt_task_t *task,
@@ -206,19 +218,73 @@ index ea77bedd..4945a138 100644
      if (nxt_fast_path(res == NXT_OK)) {
          /*
           * The shared port carries nothing but READ_QUEUE (a worker's own
-@@ -9258,6 +9280,11 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
+@@ -9216,6 +9238,7 @@ nxt_router_test_prepare_msg(nxt_task_t *task, nxt_http_request_t *r,
+ static void
+ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
+ {
++    nxt_msec_t               timeout;
+     nxt_timer_t              *timer;
+     nxt_msg_info_t           *msg_info;
+     nxt_http_request_t       *r;
+@@ -9258,6 +9281,14 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
       * nxt_port_rpc_handler() and is dropped.  The port layer completes the
       * buffers of a message that no handler took.
       *
 +     * After a worker exits, nxt_router_claim_deadline() arms this timer for
-+     * a claimed request with ->claimed_expired already set.  That expiry
-+     * answers at once: a whole deadline without an acknowledgement passed
-+     * after the claim was seen.
++     * a request that left the queue, with ->claim_deadline set.  A request
++     * that a worker claimed before the exit has ->claimed_expired set too,
++     * so that expiry answers 503.  A request that a worker claimed after the
++     * exit gets one more deadline, without the alert: only a live worker can
++     * have claimed it.  A request that no worker claimed by then is
++     * retracted below and answered 503.
 +     *
       * The router cannot mark the worker detached, as nxt_router_app_abandon()
       * does for an acknowledged request.  The request is still on the shared
       * port, and the router does not know which worker claimed it.
-@@ -9342,6 +9369,135 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
+@@ -9290,14 +9321,20 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
+         if (req_rpc_data->claimed_expired == 0) {
+             req_rpc_data->claimed_expired = 1;
+ 
+-            nxt_alert(task, "app \"%V\": stream #%uD was claimed by a worker, "
+-                      "and the %M ms deadline expired without an "
+-                      "acknowledgement",
+-                      &req_rpc_data->app->name, req_rpc_data->stream,
+-                      req_rpc_data->app->timeout);
++            timeout = req_rpc_data->app->timeout;
++
++            if (!req_rpc_data->claim_deadline) {
++                nxt_alert(task, "app \"%V\": stream #%uD was claimed by a "
++                          "worker, and the %M ms deadline expired without an "
++                          "acknowledgement",
++                          &req_rpc_data->app->name, req_rpc_data->stream,
++                          timeout);
++
++            } else if (timeout == 0 || timeout > NXT_ROUTER_CLAIM_DEADLINE) {
++                timeout = NXT_ROUTER_CLAIM_DEADLINE;
++            }
+ 
+-            nxt_timer_add(task->thread->engine, timer,
+-                          req_rpc_data->app->timeout);
++            nxt_timer_add(task->thread->engine, timer, timeout);
+ 
+             return;
+         }
+@@ -9305,6 +9342,14 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
+         nxt_log(task, NXT_LOG_WARN, "app \"%V\": stream #%uD is still not "
+                 "acknowledged, answering 503", &req_rpc_data->app->name,
+                 req_rpc_data->stream);
++
++    } else if (msg_info->cancel == NXT_MSG_RETRACTED
++               && req_rpc_data->claim_deadline)
++    {
++        nxt_log(task, NXT_LOG_WARN, "app \"%V\": stream #%uD left the queue, "
++                "and no worker claimed it after a worker exited, "
++                "answering 503", &req_rpc_data->app->name,
++                req_rpc_data->stream);
+     }
+ 
+     /*
+@@ -9342,6 +9387,132 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
  }
  
  
@@ -253,30 +319,31 @@ index ea77bedd..4945a138 100644
 + * application for ever, so a configuration that removes the application
 + * never frees it, and the connection of the request keeps its listener bound.
 + *
-+ * So, after each exit, look at every request of this engine that is not
-+ * acknowledged:
++ * So, after each exit, every request of this engine that left the queue and
++ * is not acknowledged gets a deadline of NXT_ROUTER_CLAIM_DEADLINE.  A
++ * request that is still in the queue does not: a worker can still take it.
 + *
-+ *   - If the item is still in the queue, a worker can still take it.  Leave
-+ *     it.
++ * The router does not know which worker took the item, and REMOVE_PID does
++ * not say which application the process served.  So the item can be in the
++ * hands of a live worker, of any application, that is between the dequeue
++ * and the claim, or between the claim and the acknowledgement.  Thus this
++ * function only reads the tracking word and changes nothing in the queue.
++ * The decision waits for the deadline, in nxt_router_app_timeout():
 + *
-+ *   - If the item left the queue and the retraction wins, no worker claimed
-+ *     it, and the compare-and-swap of any worker now fails.  The worker that
-+ *     dequeued it died before its claim.  Answer 503 at once: no worker runs
-+ *     the request.
++ *   - If no worker claimed the item by then, the retraction wins, no worker
++ *     can claim the item later, and the answer is 503.
 + *
-+ *   - If the retraction loses, a worker claimed the request.  Give it a
-+ *     deadline of NXT_ROUTER_CLAIM_DEADLINE.  At the deadline,
-+ *     nxt_router_app_timeout() answers 503 and unlinks the request, as at
-+ *     the second expiry of a claimed request.
++ *   - If a worker claimed it before the exit and did not acknowledge it by
++ *     then, the answer is 503, as at the second expiry of a claimed request.
 + *
-+ * The unlink releases the application and the connection.
++ *   - If a worker claimed it after the exit, that worker is alive.  It gets
++ *     one more deadline for its acknowledgement.
 + *
-+ * The claim does not tell which worker made it, so a live worker can hold
-+ * such a request too.  A live worker sends the acknowledgement right after
-+ * the claim, or after it gets a port or a shared memory segment from the
-+ * router.  The deadline is long for those waits, and the acknowledgement
-+ * removes it.  A claim after this check gets no deadline, because a dead
-+ * worker cannot make it.
++ * The acknowledgement removes the deadline.  A live worker claims an item
++ * right after the dequeue, and it sends the acknowledgement right after the
++ * claim or after it gets a port or a shared memory segment from the router.
++ * The deadline is long for all of these.  The 503 unlinks the request, and
++ * the unlink releases the application and the connection.
 + */
 +
 +static void
@@ -285,7 +352,7 @@ index ea77bedd..4945a138 100644
 +{
 +    nxt_app_t           *app;
 +    nxt_port_t          *port;
-+    nxt_msec_t          timeout;
++    nxt_bool_t          claimed;
 +    nxt_msg_info_t      *msg_info;
 +    nxt_http_request_t  *r;
 +
@@ -310,33 +377,16 @@ index ea77bedd..4945a138 100644
 +            return;
 +        }
 +
-+        (void) nxt_router_msg_retract(task, req_rpc_data);
-+    }
-+
-+    if (msg_info->cancel == NXT_MSG_RETRACTED) {
-+        nxt_log(task, NXT_LOG_WARN, "app \"%V\": a worker exited after it "
-+                "took stream #%uD from the queue and before it claimed it, "
-+                "answering 503", &app->name, req_rpc_data->stream);
-+
-+        timeout = 0;
++        /*
++         * A claim changes the tracking word.  So does a reuse of the slot,
++         * and then the item left the queue too.
++         */
++        claimed = (nxt_app_queue_tracking(port->queue,
++                                          msg_info->tracking_cookie)
++                   != req_rpc_data->stream);
 +
 +    } else if (msg_info->cancel == NXT_MSG_CLAIMED) {
-+
-+        if (app->timeout != 0 && app->timeout <= NXT_ROUTER_CLAIM_DEADLINE) {
-+            /* The deadline of the application is sooner. */
-+            req_rpc_data->claim_deadline = 1;
-+            return;
-+        }
-+
-+        nxt_log(task, NXT_LOG_WARN, "app \"%V\": a worker exited, and "
-+                "stream #%uD is claimed and not acknowledged; it is answered "
-+                "with 503 in %d ms if no acknowledgement comes", &app->name,
-+                req_rpc_data->stream, NXT_ROUTER_CLAIM_DEADLINE);
-+
-+        /* The next expiry answers; see nxt_router_app_timeout(). */
-+        req_rpc_data->claimed_expired = 1;
-+
-+        timeout = NXT_ROUTER_CLAIM_DEADLINE;
++        claimed = 1;
 +
 +    } else {
 +        return;
@@ -344,17 +394,30 @@ index ea77bedd..4945a138 100644
 +
 +    req_rpc_data->claim_deadline = 1;
 +
++    if (app->timeout != 0 && app->timeout <= NXT_ROUTER_CLAIM_DEADLINE) {
++        /* The deadline of the application is sooner. */
++        return;
++    }
++
++    nxt_debug(task, "app \"%V\": a worker exited, stream #%uD %s and is not "
++              "acknowledged, deadline %d ms", &app->name, req_rpc_data->stream,
++              claimed ? "is claimed" : "is not claimed yet",
++              NXT_ROUTER_CLAIM_DEADLINE);
++
++    /* A claim before the exit is answered at the deadline. */
++    req_rpc_data->claimed_expired = claimed;
++
 +    r->timer.handler = nxt_router_app_timeout;
 +    r->timer_data = req_rpc_data;
 +
-+    nxt_timer_add(task->thread->engine, &r->timer, timeout);
++    nxt_timer_add(task->thread->engine, &r->timer, NXT_ROUTER_CLAIM_DEADLINE);
 +}
 +
 +
  static void
  nxt_router_http_request_release_post(nxt_task_t *task, nxt_http_request_t *r)
  {
-@@ -9365,6 +9521,26 @@ nxt_router_http_request_release(nxt_task_t *task, void *obj, void *data)
+@@ -9365,6 +9536,26 @@ nxt_router_http_request_release(nxt_task_t *task, void *obj, void *data)
  
  #if (NXT_TESTS)
  
@@ -446,10 +509,10 @@ index c52ad8b0..21ceb158 100644
  
  
 diff --git a/src/test/nxt_router_app_timeout_test.c b/src/test/nxt_router_app_timeout_test.c
-index 513e63f6..912adece 100644
+index 513e63f6..d012cf36 100644
 --- a/src/test/nxt_router_app_timeout_test.c
 +++ b/src/test/nxt_router_app_timeout_test.c
-@@ -48,6 +48,15 @@
+@@ -48,6 +48,17 @@
   * only the send to the protocol is skipped.  Its RPC is registered with the
   * router's own handlers on the engine port, and the late messages go
   * through nxt_port_rpc_handler().
@@ -457,15 +520,17 @@ index 513e63f6..912adece 100644
 + * The last leg is a worker that exits between its dequeue and its
 + * acknowledgement, with no "limits": {"timeout"}.  Nothing else answers such
 + * a request, and the application it holds is never freed.  After REMOVE_PID,
-+ * a claimed request must get a deadline of NXT_ROUTER_CLAIM_DEADLINE and
-+ * then a 503.  A request that was dequeued and not claimed must get a 503 at
-+ * once, and no worker may claim it later.  A request that is still queued
-+ * must keep no deadline and stay in the queue.  An acknowledgement must
-+ * remove the deadline.
++ * a request that left the queue must get a deadline of
++ * NXT_ROUTER_CLAIM_DEADLINE, and the exit itself must change nothing: the
++ * request can be in the hands of a live worker that has not claimed it yet.
++ * At the deadline, a request that the dead worker claimed or dequeued is
++ * answered 503, and no worker can claim it later.  A request that a live
++ * worker claimed after the exit is not answered.  A request that is still
++ * queued keeps no deadline.  An acknowledgement removes the deadline.
   */
  
  #include <nxt_main.h>
-@@ -271,9 +280,10 @@ nxt_router_app_timeout_test_arm(nxt_task_t *task, nxt_event_engine_t *engine,
+@@ -271,9 +282,10 @@ nxt_router_app_timeout_test_arm(nxt_task_t *task, nxt_event_engine_t *engine,
      msg.pm.type = NXT_PORT_MSG_REQ_HEADERS;
      msg.pm.mmap = 1;
  
@@ -478,7 +543,7 @@ index 513e63f6..912adece 100644
      {
          return NXT_ERROR;
      }
-@@ -299,6 +309,58 @@ nxt_router_app_timeout_test_arm(nxt_task_t *task, nxt_event_engine_t *engine,
+@@ -299,6 +311,58 @@ nxt_router_app_timeout_test_arm(nxt_task_t *task, nxt_event_engine_t *engine,
  }
  
  
@@ -537,27 +602,28 @@ index 513e63f6..912adece 100644
  /*
   * A message from the worker for "stream", through the RPC dispatch of the
   * engine port.
-@@ -339,6 +401,8 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
+@@ -339,6 +403,9 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
      nxt_app_queue_t                    *queue;
      nxt_event_engine_t                 engine, *saved_engine;
      nxt_router_app_timeout_test_req_t  claimed, unclaimed, skipped;
-+    nxt_router_app_timeout_test_req_t  exited, dropped, waiting, acked;
-+    uint32_t                           dropped_cookie;
++    nxt_router_app_timeout_test_req_t  exited, dropped, slow, waiting;
++    uint32_t                           dropped_cookie, dropped_stream;
++    uint32_t                           slow_cookie;
      nxt_log_t                          engine_log;
  
      nxt_thread_time_update(thr);
-@@ -348,6 +412,10 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
+@@ -348,6 +415,10 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
      shared_port = NULL;
      engine_port = NULL;
      claimed.stream = 0;
 +    exited.stream = 0;
 +    dropped.stream = 0;
 +    waiting.stream = 0;
-+    acked.stream = 0;
++    slow.stream = 0;
      req_mp = NULL;
      app_mutex = 0;
      timers = 0;
-@@ -388,6 +456,7 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
+@@ -388,6 +459,7 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
      engine.fast_work_queue.cache = &engine.work_queue_cache;
      nxt_work_queue_name(&engine.fast_work_queue, "fast");
      engine.mem_pool = mp;
@@ -565,16 +631,25 @@ index 513e63f6..912adece 100644
  
      /*
       * The deadline runs on the engine's own task, as it does in the router.
-@@ -798,6 +867,246 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
+@@ -798,6 +870,241 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
          goto done;
      }
  
 +    /*
-+     * Leg 4: workers exit between the dequeue and the acknowledgement.  The
-+     * application has no deadline, as with the default configuration, so
-+     * nxt_router_app_port_get() arms no timer.  "exited" is claimed by the
-+     * worker that dies.  "dropped" is dequeued by a worker that dies before
-+     * its claim.  "waiting" is still in the queue.
++     * Leg 4: a worker exits while requests are between the dequeue and the
++     * acknowledgement.  The application has no deadline, as with the default
++     * configuration, so nxt_router_app_port_get() arms no timer.
++     *
++     *   - "exited" is claimed by the worker that dies;
++     *   - "dropped" is dequeued by the worker that dies before its claim;
++     *   - "slow" is dequeued by a live worker that has not claimed it yet,
++     *     because it was preempted between the two steps;
++     *   - "waiting" is still in the queue.
++     *
++     * The router cannot tell "dropped" from "slow".  The exit must not take
++     * "slow" away from its worker, so it must not retract or answer anything.
++     * The deadline decides: "exited" and "dropped" are answered 503, and
++     * "slow", claimed in the meantime, is not.
 +     */
 +
 +    app->timeout = 0;
@@ -594,6 +669,9 @@ index 513e63f6..912adece 100644
 +                          &engine, req_mp, app, engine_port, &dropped)
 +                         != NXT_OK
 +                      || nxt_router_app_timeout_test_arm_unacked(task,
++                          &engine, req_mp, app, engine_port, &slow)
++                         != NXT_OK
++                      || nxt_router_app_timeout_test_arm_unacked(task,
 +                          &engine, req_mp, app, engine_port, &waiting)
 +                         != NXT_OK))
 +    {
@@ -602,64 +680,62 @@ index 513e63f6..912adece 100644
 +        goto done;
 +    }
 +
-+    if (nxt_slow_path(!nxt_router_app_timeout_test_claim(queue))) {
-+        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: the worker could not claim "
-+                      "the queued message");
-+        goto done;
-+    }
-+
-+    /* The unlink frees the RPC data, so the cookie is kept here. */
++    /* The unlink frees the RPC data, so the cookies are kept here. */
 +    dropped_cookie = dropped.req_rpc_data->msg_info.tracking_cookie;
++    dropped_stream = dropped.stream;
++    slow_cookie = slow.req_rpc_data->msg_info.tracking_cookie;
 +
-+    if (nxt_slow_path(nxt_router_app_timeout_test_dequeue(queue)
-+                      != dropped_cookie))
++    if (nxt_slow_path(!nxt_router_app_timeout_test_claim(queue)
++                      || nxt_router_app_timeout_test_dequeue(queue)
++                         != dropped_cookie
++                      || nxt_router_app_timeout_test_dequeue(queue)
++                         != slow_cookie))
 +    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: the worker could not dequeue "
-+                      "the queued message");
++                      "router app timeout test: the workers could not take "
++                      "the queued messages");
 +        goto done;
 +    }
 +
 +    nxt_router_app_timeout_test_completions = 0;
 +    nxt_router_app_timeout_test_alerts = 0;
 +
-+    /* The main thread closed the ports of the worker and tells the engine. */
++    /* The main thread closed the ports of a worker and tells the engine. */
 +
 +    nxt_router_test_remove_pid(task, engine_port, 12345);
 +
 +    nxt_router_app_timeout_test_tick(task, &engine, 0);
 +
-+    if (exited.req_rpc_data->msg_info.cancel != NXT_MSG_CLAIMED
-+        || !exited.r->timer.enabled
-+        || !exited.req_rpc_data->claim_deadline
-+        || exited.r->status != 0)
++    if (slow.r->status != 0 || slow.r->req_rpc_data == NULL
++        || slow.req_rpc_data->msg_info.cancel != NXT_MSG_QUEUED)
 +    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: a request that an exited "
-+                      "worker claimed got no deadline (cancel %d, timer %d, "
-+                      "status %d)",
-+                      (int) exited.req_rpc_data->msg_info.cancel,
++                      "router app timeout test: the exit of another worker "
++                      "took a request from a live worker that dequeued it "
++                      "and did not claim it yet (status %d, cancel %d)",
++                      (int) slow.r->status,
++                      (slow.r->req_rpc_data != NULL)
++                      ? (int) slow.req_rpc_data->msg_info.cancel : -1);
++        goto done;
++    }
++
++    if (exited.r->status != 0 || dropped.r->status != 0
++        || !exited.r->timer.enabled || !dropped.r->timer.enabled
++        || !slow.r->timer.enabled
++        || !exited.req_rpc_data->claimed_expired
++        || dropped.req_rpc_data->claimed_expired
++        || slow.req_rpc_data->claimed_expired)
++    {
++        nxt_log_error(NXT_LOG_NOTICE, thr->log,
++                      "router app timeout test: the exit did not give the "
++                      "requests that left the queue a deadline (status %d "
++                      "%d, timer %d %d %d)",
++                      (int) exited.r->status, (int) dropped.r->status,
 +                      (int) exited.r->timer.enabled,
-+                      (int) exited.r->status);
++                      (int) dropped.r->timer.enabled,
++                      (int) slow.r->timer.enabled);
 +        goto done;
 +    }
-+
-+    /* No worker claimed "dropped", so no worker runs it: 503 at once. */
-+
-+    if (dropped.r->status != NXT_HTTP_SERVICE_UNAVAILABLE
-+        || dropped.r->req_rpc_data != NULL
-+        || nxt_app_queue_cancel(queue, dropped_cookie, dropped.stream))
-+    {
-+        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: a request that an exited "
-+                      "worker dequeued and did not claim was not answered, "
-+                      "or a worker can still claim it (status %d)",
-+                      (int) dropped.r->status);
-+        goto done;
-+    }
-+
-+    dropped.stream = 0;
 +
 +    if (waiting.req_rpc_data->msg_info.cancel != NXT_MSG_QUEUED
 +        || waiting.r->timer.enabled
@@ -680,17 +756,29 @@ index 513e63f6..912adece 100644
 +        goto done;
 +    }
 +
++    /* The live worker claims its request now. */
++
++    if (!nxt_app_queue_cancel(queue, slow_cookie, slow.stream)) {
++        nxt_log_error(NXT_LOG_NOTICE, thr->log,
++                      "router app timeout test: a live worker could not "
++                      "claim the request it dequeued");
++        goto done;
++    }
++
 +    /* Just before the deadline, nothing is answered. */
 +
 +    nxt_router_app_timeout_test_tick(task, &engine,
 +                                     NXT_ROUTER_CLAIM_DEADLINE
 +                                     - 2 * NXT_TIMER_DEFAULT_BIAS);
 +
-+    if (exited.r->status != 0 || exited.r->req_rpc_data == NULL) {
++    if (exited.r->status != 0 || dropped.r->status != 0
++        || slow.r->status != 0)
++    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: a claimed request was "
-+                      "answered before its deadline (status %d)",
-+                      (int) exited.r->status);
++                      "router app timeout test: a request was answered "
++                      "before its deadline (status %d %d %d)",
++                      (int) exited.r->status, (int) dropped.r->status,
++                      (int) slow.r->status);
 +        goto done;
 +    }
 +
@@ -701,84 +789,59 @@ index 513e63f6..912adece 100644
 +
 +    if (exited.r->status != NXT_HTTP_SERVICE_UNAVAILABLE
 +        || exited.r->req_rpc_data != NULL
-+        || engine_port->use_count != engine_port_use - 1
++        || dropped.r->status != NXT_HTTP_SERVICE_UNAVAILABLE
++        || dropped.r->req_rpc_data != NULL
++        || engine_port->use_count != engine_port_use - 2
 +        || nxt_router_app_timeout_test_alerts != 0)
 +    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: the deadline of a request "
-+                      "that an exited worker claimed did not answer 503 and "
-+                      "cancel the RPC (status %d, port use %uD, expected "
-+                      "%uD, %ui alerts)",
-+                      (int) exited.r->status,
++                      "router app timeout test: the deadline did not answer "
++                      "503 for the requests of the dead worker (status %d "
++                      "%d, port use %uD, expected %uD, %ui alerts)",
++                      (int) exited.r->status, (int) dropped.r->status,
 +                      (uint32_t) engine_port->use_count,
-+                      (uint32_t) (engine_port_use - 1),
++                      (uint32_t) (engine_port_use - 2),
 +                      nxt_router_app_timeout_test_alerts);
 +        goto done;
 +    }
 +
 +    exited.stream = 0;
++    dropped.stream = 0;
 +
-+    /* The unlinks took both requests off the engine. */
++    /* The retraction was real: a late claim of "dropped" fails. */
 +
-+    if (nxt_queue_first(&engine.unacked_requests)
-+        != &waiting.req_rpc_data->engine_link
-+        || nxt_queue_last(&engine.unacked_requests)
-+           != &waiting.req_rpc_data->engine_link)
++    if (nxt_app_queue_cancel(queue, dropped_cookie, dropped_stream)) {
++        nxt_log_error(NXT_LOG_NOTICE, thr->log,
++                      "router app timeout test: a worker can still claim a "
++                      "request that was answered 503");
++        goto done;
++    }
++
++    /* The live worker claimed after the exit: one more deadline, no 503. */
++
++    if (slow.r->status != 0 || slow.r->req_rpc_data == NULL
++        || !slow.r->timer.enabled
++        || slow.req_rpc_data->msg_info.cancel != NXT_MSG_CLAIMED)
 +    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: an unlink left a request "
-+                      "in unacked_requests");
++                      "router app timeout test: the deadline answered a "
++                      "request that a live worker claimed after the exit "
++                      "(status %d, timer %d)",
++                      (int) slow.r->status, (int) slow.r->timer.enabled);
 +        goto done;
 +    }
 +
 +    /*
-+     * An acknowledgement removes the deadline.  A worker claims "waiting"
-+     * and "acked", and then a worker exits.  The acknowledgement of "acked"
-+     * comes after the exit.
++     * The acknowledgement removes the deadline.  The application has no port
++     * for it in this fixture, so it answers 500, never 503.
 +     */
 +
-+    if (nxt_slow_path(nxt_router_app_timeout_test_arm_unacked(task, &engine,
-+                          req_mp, app, engine_port, &acked) != NXT_OK))
-+    {
-+        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: could not arm a request");
-+        goto done;
-+    }
-+
-+    if (nxt_slow_path(!nxt_router_app_timeout_test_claim(queue)
-+                      || !nxt_router_app_timeout_test_claim(queue)))
-+    {
-+        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: the worker could not claim "
-+                      "the queued messages");
-+        goto done;
-+    }
-+
-+    nxt_router_test_remove_pid(task, engine_port, 12346);
-+
-+    nxt_router_app_timeout_test_tick(task, &engine, 0);
-+
-+    if (!acked.r->timer.enabled || !acked.req_rpc_data->claim_deadline
-+        || !waiting.r->timer.enabled)
-+    {
-+        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: a second exit gave a claimed "
-+                      "request no deadline (timer %d)",
-+                      (int) acked.r->timer.enabled);
-+        goto done;
-+    }
-+
-+    /*
-+     * The application has no port for this acknowledgement, so it answers
-+     * 500.  That is the answer for a worker that is gone.
-+     */
-+
-+    nxt_router_app_timeout_test_late(task, engine_port, acked.stream,
++    nxt_router_app_timeout_test_late(task, engine_port, slow.stream,
 +                                     _NXT_PORT_MSG_REQ_HEADERS_ACK, 0);
 +
-+    if (acked.r->timer.enabled
-+        || acked.req_rpc_data->claim_deadline
-+        || acked.r->status != NXT_HTTP_INTERNAL_SERVER_ERROR
++    if (slow.r->timer.enabled
++        || slow.req_rpc_data->claim_deadline
++        || slow.r->status != NXT_HTTP_INTERNAL_SERVER_ERROR
 +        || nxt_queue_first(&engine.unacked_requests)
 +           != &waiting.req_rpc_data->engine_link
 +        || nxt_queue_last(&engine.unacked_requests)
@@ -787,32 +850,30 @@ index 513e63f6..912adece 100644
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
 +                      "router app timeout test: the acknowledgement left the "
 +                      "deadline or the link (timer %d, status %d)",
-+                      (int) acked.r->timer.enabled,
-+                      (int) acked.r->status);
++                      (int) slow.r->timer.enabled, (int) slow.r->status);
 +        goto done;
 +    }
 +
 +    nxt_router_app_timeout_test_tick(task, &engine,
 +                                     2 * NXT_ROUTER_CLAIM_DEADLINE);
 +
-+    if (acked.r->status != NXT_HTTP_INTERNAL_SERVER_ERROR
-+        || acked.r->req_rpc_data == NULL
-+        || waiting.r->status != NXT_HTTP_SERVICE_UNAVAILABLE
-+        || waiting.r->req_rpc_data != NULL)
++    if (slow.r->status != NXT_HTTP_INTERNAL_SERVER_ERROR
++        || slow.r->req_rpc_data == NULL
++        || waiting.r->status != 0 || waiting.r->timer.enabled
++        || nxt_router_app_timeout_test_alerts != 0)
 +    {
 +        nxt_log_error(NXT_LOG_NOTICE, thr->log,
-+                      "router app timeout test: the deadlines after the "
-+                      "second exit answered wrongly (acked %d, waiting %d)",
-+                      (int) acked.r->status, (int) waiting.r->status);
++                      "router app timeout test: a removed deadline answered "
++                      "(slow %d, waiting %d, %ui alerts)",
++                      (int) slow.r->status, (int) waiting.r->status,
++                      nxt_router_app_timeout_test_alerts);
 +        goto done;
 +    }
-+
-+    waiting.stream = 0;
 +
      nxt_log_error(NXT_LOG_NOTICE, thr->log, "router app timeout test passed");
  
      ret = NXT_OK;
-@@ -814,6 +1123,22 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
+@@ -814,6 +1121,22 @@ nxt_router_app_timeout_test(nxt_thread_t *thr)
              nxt_port_rpc_cancel(task, engine_port, claimed.stream);
          }
  
@@ -828,13 +889,172 @@ index 513e63f6..912adece 100644
 +            nxt_port_rpc_cancel(task, engine_port, waiting.stream);
 +        }
 +
-+        if (acked.stream != 0) {
-+            nxt_port_rpc_cancel(task, engine_port, acked.stream);
++        if (slow.stream != 0) {
++            nxt_port_rpc_cancel(task, engine_port, slow.stream);
 +        }
 +
          if (engine_port->pair[0] != -1) {
              nxt_socket_close(task, engine_port->pair[0]);
              nxt_socket_close(task, engine_port->pair[1]);
+diff --git a/test/test_app_claim_exit.py b/test/test_app_claim_exit.py
+new file mode 100644
+index 00000000..3f243854
+--- /dev/null
++++ b/test/test_app_claim_exit.py
+@@ -0,0 +1,153 @@
++"""A worker that dies after it claims a request and before it acknowledges it.
++
++Issue: https://github.com/freeunitorg/freeunit/issues/665
++
++A worker takes a request from the shared queue of its application with a
++compare-and-swap, and only the REQ_HEADERS_ACK that follows tells the router
++which worker it was.  A worker that died between the two left the request with
++no answer and no deadline, because REMOVE_PID fails only the requests whose
++RPC peer is the dead process, and a request gets its peer at the
++acknowledgement.  The request also kept its application and its connection,
++so a configuration that removed the application did not free it, and the
++listener stayed bound: every later configuration on the same port failed with
++"bind() ... (98: Address already in use)".
++
++The kill is not a race here.  The application (test/python/claim_exit)
++installs a seccomp filter that kills the worker at its next sendmsg(2).  The
++worker has served no request, so the first sendmsg() after its first claim
++asks the router for the shared memory segment of the request.  So the request
++is always claimed and never acknowledged.
++
++The router now gives such a request a deadline of NXT_ROUTER_CLAIM_DEADLINE
++(5 s, src/nxt_router_request.h) after REMOVE_PID, and answers 503 at the
++deadline.  The test checks the answer and its time, and then that the
++application is freed and the port can be bound again.
++"""
++
++import os
++import re
++import subprocess
++import time
++
++import pytest
++
++from unit.applications.lang.python import ApplicationPython
++
++prerequisites = {'modules': {'python': 'any'}}
++
++client = ApplicationPython()
++
++# NXT_ROUTER_CLAIM_DEADLINE in src/nxt_router_request.h, in seconds.
++CLAIM_DEADLINE = 5
++
++# The bound for the 503.  The deadline starts when the router reads
++# REMOVE_PID, which comes after the prototype reaps the worker, so a loaded
++# host adds some time.  Without the fix no answer comes at all.
++ANSWER_BOUND = CLAIM_DEADLINE + 10
++
++
++def app_pids(name, kind=r'\w+'):
++    """Pids of the processes of application "name": "prototype",
++    "application" (a worker), or both."""
++
++    output = subprocess.check_output(['ps', 'ax', '-o', 'pid=,args=']).decode()
++    title = fr'^\s*(\d+)\s+unit: "{name}" {kind}$'
++
++    return [int(m.group(1)) for m in re.finditer(title, output, re.M)]
++
++
++def pid_alive(pid):
++    try:
++        os.kill(pid, 0)
++
++    except ProcessLookupError:
++        return False
++
++    return True
++
++
++def wait_for(predicate, timeout):
++    end = time.monotonic() + timeout
++
++    while time.monotonic() < end:
++        if predicate():
++            return True
++
++        time.sleep(0.1)
++
++    return predicate()
++
++
++def read_file(path):
++    try:
++        with open(path, encoding='utf-8') as f:
++            return f.read()
++
++    except FileNotFoundError:
++        return ''
++
++
++def test_app_claim_exit(temp_dir, skip_alert, wait_for_record):
++    # The worker dies of SIGSYS from its own filter.
++    skip_alert(r'process \d+ exited on signal')
++
++    trigger = f'{temp_dir}/claim_exit.trigger'
++    status = f'{temp_dir}/claim_exit.status'
++
++    client.load(
++        'claim_exit',
++        processes=1,
++        environment={
++            'CLAIM_EXIT_TRIGGER': trigger,
++            'CLAIM_EXIT_STATUS': status,
++        },
++    )
++
++    # The worker must not serve a request before the kill; see the
++    # application.  So it is found by its process title, not by a request.
++    assert (
++        wait_for_record(r'"claim_exit" application started') is not None
++    ), 'worker start'
++
++    workers = app_pids('claim_exit', 'application')
++    assert len(workers) == 1, f'workers: {workers}'
++
++    with open(trigger, 'w', encoding='utf-8'):
++        pass
++
++    assert wait_for(lambda: read_file(status) != '', 30), 'filter status'
++
++    result = read_file(status)
++    if result != 'armed':
++        pytest.skip(f'cannot install the seccomp filter: {result!r}')
++
++    start = time.monotonic()
++    resp = client.get(read_timeout=ANSWER_BOUND)
++    elapsed = time.monotonic() - start
++
++    assert resp.get('status') == 503, (
++        f'no answer for a claimed request after {elapsed:.1f} s'
++    )
++    assert elapsed < ANSWER_BOUND, 'answer time'
++    assert elapsed >= CLAIM_DEADLINE - 1, 'answered before the deadline'
++
++    assert wait_for(lambda: not pid_alive(workers[0]), 10), 'worker exit'
++    record = r'stream #\d+ is still not acknowledged, answering 503'
++    assert wait_for_record(record) is not None, 'claim deadline log'
++
++    # The request released the application: removing it from the
++    # configuration frees it, which stops its prototype and workers.
++    pids = app_pids('claim_exit')
++    assert pids, 'application processes'
++
++    assert 'success' in client.conf({"listeners": {}, "applications": {}})
++
++    assert wait_for(lambda: not any(pid_alive(p) for p in pids), 20), (
++        f'application processes left: {[p for p in pids if pid_alive(p)]}'
++    )
++
++    # The request released its connection, so the listener is closed and
++    # the same port can be bound again.
++    client.load('empty')
++
++    assert client.get()['status'] == 200, 'the port is bound again'
 diff --git a/test/python/claim_exit/wsgi.py b/test/python/claim_exit/wsgi.py
 new file mode 100644
 index 00000000..538a66df
@@ -986,164 +1206,3 @@ index 00000000..538a66df
 +def application(environ, start_response):
 +    start_response('200', [('Content-Length', '0')])
 +    return []
-diff --git a/test/test_app_claim_exit.py b/test/test_app_claim_exit.py
-new file mode 100644
-index 00000000..13c78870
---- /dev/null
-+++ b/test/test_app_claim_exit.py
-@@ -0,0 +1,155 @@
-+"""A worker that dies after it claims a request and before it acknowledges it.
-+
-+Issue: https://github.com/freeunitorg/freeunit/issues/665
-+
-+A worker takes a request from the shared queue of its application with a
-+compare-and-swap, and only the REQ_HEADERS_ACK that follows tells the router
-+which worker it was.  A worker that died between the two left the request with
-+no answer and no deadline, because REMOVE_PID fails only the requests whose
-+RPC peer is the dead process, and a request gets its peer at the
-+acknowledgement.  The request also kept its application and its connection,
-+so a configuration that removed the application did not free it, and the
-+listener stayed bound: every later configuration on the same port failed with
-+"bind() ... (98: Address already in use)".
-+
-+The kill is not a race here.  The application (test/python/claim_exit)
-+installs a seccomp filter that kills the worker at its next sendmsg(2).  The
-+worker has served no request, so the first sendmsg() after its first claim
-+asks the router for the shared memory segment of the request.  So the request
-+is always claimed and never acknowledged.
-+
-+The router now gives such a request a deadline of NXT_ROUTER_CLAIM_DEADLINE
-+(5 s, src/nxt_router_request.h) after REMOVE_PID, and answers 503 at the
-+deadline.  The test checks the answer and its time, and then that the
-+application is freed and the port can be bound again.
-+"""
-+
-+import os
-+import re
-+import subprocess
-+import time
-+
-+import pytest
-+
-+from unit.applications.lang.python import ApplicationPython
-+
-+prerequisites = {'modules': {'python': 'any'}}
-+
-+client = ApplicationPython()
-+
-+# NXT_ROUTER_CLAIM_DEADLINE in src/nxt_router_request.h, in seconds.
-+CLAIM_DEADLINE = 5
-+
-+# The bound for the 503.  The deadline starts when the router reads
-+# REMOVE_PID, which comes after the prototype reaps the worker, so a loaded
-+# host adds some time.  Without the fix no answer comes at all.
-+ANSWER_BOUND = CLAIM_DEADLINE + 10
-+
-+
-+def app_pids(name, kind=r'\w+'):
-+    """Pids of the processes of application "name": "prototype",
-+    "application" (a worker), or both."""
-+
-+    output = subprocess.check_output(['ps', 'ax', '-o', 'pid=,args=']).decode()
-+    title = fr'^\s*(\d+)\s+unit: "{name}" {kind}$'
-+
-+    return [int(m.group(1)) for m in re.finditer(title, output, re.M)]
-+
-+
-+def pid_alive(pid):
-+    try:
-+        os.kill(pid, 0)
-+
-+    except ProcessLookupError:
-+        return False
-+
-+    return True
-+
-+
-+def wait_for(predicate, timeout):
-+    end = time.monotonic() + timeout
-+
-+    while time.monotonic() < end:
-+        if predicate():
-+            return True
-+
-+        time.sleep(0.1)
-+
-+    return predicate()
-+
-+
-+def read_file(path):
-+    try:
-+        with open(path, encoding='utf-8') as f:
-+            return f.read()
-+
-+    except FileNotFoundError:
-+        return ''
-+
-+
-+def test_app_claim_exit(temp_dir, skip_alert, wait_for_record):
-+    # The worker dies of SIGSYS from its own filter.
-+    skip_alert(r'process \d+ exited on signal')
-+
-+    trigger = f'{temp_dir}/claim_exit.trigger'
-+    status = f'{temp_dir}/claim_exit.status'
-+
-+    client.load(
-+        'claim_exit',
-+        processes=1,
-+        environment={
-+            'CLAIM_EXIT_TRIGGER': trigger,
-+            'CLAIM_EXIT_STATUS': status,
-+        },
-+    )
-+
-+    # The worker must not serve a request before the kill; see the
-+    # application.  So it is found by its process title, not by a request.
-+    assert (
-+        wait_for_record(r'"claim_exit" application started') is not None
-+    ), 'worker start'
-+
-+    workers = app_pids('claim_exit', 'application')
-+    assert len(workers) == 1, f'workers: {workers}'
-+
-+    with open(trigger, 'w', encoding='utf-8'):
-+        pass
-+
-+    assert wait_for(lambda: read_file(status) != '', 30), 'filter status'
-+
-+    result = read_file(status)
-+    if result != 'armed':
-+        pytest.skip(f'cannot install the seccomp filter: {result!r}')
-+
-+    start = time.monotonic()
-+    resp = client.get(read_timeout=ANSWER_BOUND)
-+    elapsed = time.monotonic() - start
-+
-+    assert resp.get('status') == 503, (
-+        f'no answer for a claimed request after {elapsed:.1f} s'
-+    )
-+    assert elapsed < ANSWER_BOUND, 'answer time'
-+    assert elapsed >= CLAIM_DEADLINE - 1, 'answered before the deadline'
-+
-+    assert wait_for(lambda: not pid_alive(workers[0]), 10), 'worker exit'
-+    assert (
-+        wait_for_record(r'stream #\d+ is claimed and not acknowledged')
-+        is not None
-+    ), 'claim deadline log'
-+
-+    # The request released the application: removing it from the
-+    # configuration frees it, which stops its prototype and workers.
-+    pids = app_pids('claim_exit')
-+    assert pids, 'application processes'
-+
-+    assert 'success' in client.conf({"listeners": {}, "applications": {}})
-+
-+    assert wait_for(lambda: not any(pid_alive(p) for p in pids), 20), (
-+        f'application processes left: {[p for p in pids if pid_alive(p)]}'
-+    )
-+
-+    # The request released its connection, so the listener is closed and
-+    # the same port can be bound again.
-+    client.load('empty')
-+
-+    assert client.get()['status'] == 200, 'the port is bound again'
