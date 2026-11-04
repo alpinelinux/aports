@@ -1,0 +1,169 @@
+Patch-Source: https://github.com/msgpack/msgpack-php/pull/192
+From d8eba363b8976dd590192f790b0bdf31178ea245 Mon Sep 17 00:00:00 2001
+From: Laurin Kerkloh <laurin@kerk-loh.de>
+Date: Mon, 5 Oct 2026 09:49:48 +0200
+Subject: [PATCH] Fix object reference key collision in msgpack_var_add
+
+Objects were keyed by a mix of class entry pointer and handle, which
+is not unique: two objects of different classes could share a key,
+so one was packed as a back-reference to the other.
+
+Key objects by their zend_object address in a separate key space
+from arrays, and hold a reference to each packed object until
+packing ends so its address cannot be reused (as ext/standard/var.c
+does).
+---
+ msgpack.c                     |  1 +
+ msgpack_pack.c                | 23 ++++++++++---
+ php_msgpack.h                 |  1 +
+ tests/var_hash_collision.phpt | 62 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 82 insertions(+), 5 deletions(-)
+ create mode 100644 tests/var_hash_collision.phpt
+
+diff --git a/msgpack.c b/msgpack.c
+index a3faf30..5226055 100644
+--- a/msgpack.c
++++ b/msgpack.c
+@@ -92,6 +92,7 @@ static void msgpack_init_globals(zend_msgpack_globals *msgpack_globals) /* {{{ *
+     msgpack_globals->illegal_key_insert = 0;
+     msgpack_globals->use_str8_serialization = 1;
+     msgpack_globals->serialize.var_hash = NULL;
++    msgpack_globals->serialize.var_keep = NULL;
+     msgpack_globals->serialize.level = 0;
+ }
+ /* }}} */
+diff --git a/msgpack_pack.c b/msgpack_pack.c
+index 85d2cd4..08ae989 100644
+--- a/msgpack_pack.c
++++ b/msgpack_pack.c
+@@ -55,11 +55,11 @@ static inline int msgpack_var_add(HashTable *var_hash, zval *var, zend_long *var
+         var_noref = var;
+     }
+ 
+-    if ((Z_TYPE_P(var_noref) == IS_OBJECT) && Z_OBJCE_P(var_noref)) {
+-        p = zend_print_long_to_buf(
+-                id + sizeof(id) - 1,
+-                (((size_t)Z_OBJCE_P(var_noref) << 5)
+-                 | ((size_t)Z_OBJCE_P(var_noref) >> (sizeof(long) * 8 - 5))) + (long)Z_OBJ_HANDLE_P(var_noref));
++    if (Z_TYPE_P(var_noref) == IS_OBJECT) {
++        /* key objects by their zend_object address; the 'o' prefix keeps
++         * them apart from the (purely numeric) array keys */
++        p = zend_print_ulong_to_buf(id + sizeof(id) - 1, (zend_ulong)(zend_uintptr_t)Z_OBJ_P(var_noref));
++        *--p = 'o';
+         len = id + sizeof(id) - 1 - p;
+     } else if (Z_TYPE_P(var_noref) == IS_ARRAY) {
+         p = zend_print_long_to_buf(id + sizeof(id) - 1, (long)(var_noref));
+@@ -81,6 +81,14 @@ static inline int msgpack_var_add(HashTable *var_hash, zval *var, zend_long *var
+     ZVAL_LONG(&zv, zend_hash_num_elements(var_hash) + 1);
+     zend_hash_str_add(var_hash, p, len, &zv);
+ 
++    if (Z_TYPE_P(var_noref) == IS_OBJECT) {
++        /* keep the object alive until packing ends, so that its address
++         * cannot be reused by another (temporary) object */
++        ZVAL_OBJ(&zv, Z_OBJ_P(var_noref));
++        Z_ADDREF(zv);
++        zend_hash_next_index_insert(MSGPACK_G(serialize).var_keep, &zv);
++    }
++
+     return 1;
+ }
+ /* }}} */
+@@ -94,6 +102,8 @@ void msgpack_serialize_var_init(msgpack_serialize_data_t *var_hash) /* {{{ */ {
+         ALLOC_HASHTABLE(*var_hash_ptr);
+         zend_hash_init(*var_hash_ptr, 10, NULL, NULL, 0);
+         MSGPACK_G(serialize).var_hash = *var_hash_ptr;
++        ALLOC_HASHTABLE(MSGPACK_G(serialize).var_keep);
++        zend_hash_init(MSGPACK_G(serialize).var_keep, 10, NULL, ZVAL_PTR_DTOR, 0);
+     }
+     ++MSGPACK_G(serialize).level;
+ }
+@@ -106,6 +116,9 @@ void msgpack_serialize_var_destroy(msgpack_serialize_data_t *var_hash) /* {{{ */
+     if (!MSGPACK_G(serialize).level) {
+         zend_hash_destroy(*var_hash_ptr);
+         FREE_HASHTABLE(*var_hash_ptr);
++        zend_hash_destroy(MSGPACK_G(serialize).var_keep);
++        FREE_HASHTABLE(MSGPACK_G(serialize).var_keep);
++        MSGPACK_G(serialize).var_keep = NULL;
+     }
+ }
+ /* }}} */
+diff --git a/php_msgpack.h b/php_msgpack.h
+index 0f4f610..85fb825 100644
+--- a/php_msgpack.h
++++ b/php_msgpack.h
+@@ -29,6 +29,7 @@ ZEND_BEGIN_MODULE_GLOBALS(msgpack)
+ 	zend_bool force_f32;
+     struct {
+         void *var_hash;
++        void *var_keep;
+         unsigned level;
+     } serialize;
+ ZEND_END_MODULE_GLOBALS(msgpack)
+diff --git a/tests/var_hash_collision.phpt b/tests/var_hash_collision.phpt
+new file mode 100644
+index 0000000..271170d
+--- /dev/null
++++ b/tests/var_hash_collision.phpt
+@@ -0,0 +1,62 @@
++--TEST--
++Object reference keys must not collide between objects of different classes
++--SKIPIF--
++<?php
++if (!extension_loaded("msgpack")) {
++    exit('skip because msgpack extension is missing');
++}
++?>
++--INI--
++memory_limit=1G
++--FILE--
++<?php
++class Item {
++    public $status;
++}
++
++class Status {
++}
++
++$status = new Status();
++$items = array();
++for ($i = 0; $i < 200000; $i++) {
++    $item = new Item();
++    $item->status = $status;
++    $items[] = $item;
++}
++
++$unpacked = msgpack_unpack(msgpack_pack($items));
++foreach ($unpacked as $idx => $value) {
++    if (!$value instanceof Item) {
++        echo "index $idx: expected Item, got " . get_class($value) . "\n";
++    }
++}
++
++// temporary objects created during packing must not be confused with later ones
++
++class Tmp {
++    public $v;
++    public function __construct($v) { $this->v = $v; }
++    public function __serialize(): array { return array(new Tmp2($this->v)); }
++    public function __unserialize(array $data): void { $this->v = $data[0]->v; }
++}
++
++class Tmp2 {
++    public $v;
++    public function __construct($v) { $this->v = $v; }
++}
++
++$list = array();
++for ($i = 0; $i < 100; $i++) {
++    $list[] = new Tmp($i);
++}
++$unpacked = msgpack_unpack(msgpack_pack($list));
++foreach ($unpacked as $idx => $value) {
++    if (!$value instanceof Tmp || $value->v !== $idx) {
++        echo "index $idx: wrong value\n";
++    }
++}
++echo "done\n";
++?>
++--EXPECT--
++done
