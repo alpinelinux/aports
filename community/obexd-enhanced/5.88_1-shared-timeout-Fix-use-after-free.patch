@@ -1,0 +1,132 @@
+From 70197a083fa64cec6fff1aabc75f835aed6bc953 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Fri, 30 Oct 2026 09:44:26 -0400
+Subject: shared/timeout: Fix use-after-free when a timeout removes itself
+
+If the callback of a timeout_add() timer removes it, e.g. the tester
+test timeout restarting it for teardown, its data is freed before
+timeout_callback() reads the id, and the id may already be reused by a
+timeout added in the callback, which then gets removed instead.
+
+Keep the data while the callback runs and free it afterwards if it was
+removed, and add a unit test for it.
+
+Fixes: efe0efc925db ("shared/timeout: Add timeout_add_seconds abstraction")
+Assisted-by: OpenCode:claude-opus-5.5 valgrind
+---
+ src/shared/timeout-mainloop.c | 23 +++++++++++++++++++++--
+ unit/test-mainloop.c          | 38 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/shared/timeout-mainloop.c b/src/shared/timeout-mainloop.c
+index e6f9c5e82..3dfcdee81 100644
+--- a/src/shared/timeout-mainloop.c
++++ b/src/shared/timeout-mainloop.c
+@@ -20,14 +20,28 @@ struct timeout_data {
+ 	timeout_destroy_func_t destroy;
+ 	unsigned int timeout;
+ 	void *user_data;
++	bool running;
++	bool removed;
+ };
+ 
+ static void timeout_callback(int id, void *user_data)
+ {
+ 	struct timeout_data *data = user_data;
++	bool ret;
+ 
+-	if (data->func(data->user_data) &&
+-			!mainloop_modify_timeout(data->id, data->timeout))
++	data->running = true;
++	ret = data->func(data->user_data);
++	data->running = false;
++
++	/* The callback removed the timeout, so data was only kept around to
++	 * be checked here and its id may already be reused.
++	 */
++	if (data->removed) {
++		free(data);
++		return;
++	}
++
++	if (ret && !mainloop_modify_timeout(data->id, data->timeout))
+ 		return;
+ 
+ 	mainloop_remove_timeout(data->id);
+@@ -40,6 +54,11 @@ static void timeout_destroy(void *user_data)
+ 	if (data->destroy)
+ 		data->destroy(data->user_data);
+ 
++	if (data->running) {
++		data->removed = true;
++		return;
++	}
++
+ 	free(data);
+ }
+ 
+diff --git a/unit/test-mainloop.c b/unit/test-mainloop.c
+index 70ee03ee4..b876e0285 100644
+--- a/unit/test-mainloop.c
++++ b/unit/test-mainloop.c
+@@ -12,6 +12,7 @@
+ #include <stdlib.h>
+ 
+ #include "src/shared/mainloop.h"
++#include "src/shared/timeout.h"
+ 
+ 
+ #define test_failed_msg(msg) \
+@@ -153,6 +154,42 @@ static void test_timeout(struct test_data *data)
+ 	check(data->destroys == 1);
+ }
+ 
++static unsigned int self_remove_id;
++
++static bool readded_callback(void *user_data)
++{
++	struct test_data *data = user_data;
++
++	data->new_calls++;
++	mainloop_quit();
++
++	return false;
++}
++
++static bool self_remove_callback(void *user_data)
++{
++	struct test_data *data = user_data;
++
++	data->old_calls++;
++	timeout_remove(self_remove_id);
++	check(data->destroys == 1);
++	check(timeout_add(1, readded_callback, data, destroy) > 0);
++
++	return false;
++}
++
++static void test_timeout_remove_self(struct test_data *data)
++{
++	mainloop_init();
++
++	self_remove_id = timeout_add(1, self_remove_callback, data, destroy);
++	check(self_remove_id > 0);
++	check(mainloop_run() == EXIT_SUCCESS);
++	check(data->old_calls == 1);
++	check(data->new_calls == 1);
++	check(data->destroys == 2);
++}
++
+ #define define_test(name, function)				\
+ 	do {							\
+ 		static struct test_data data = {};		\
+@@ -167,5 +204,6 @@ int main(int argc, char *argv[])
+ 	define_test("Test Modify File Descriptor", test_modify_fd);
+ 	define_test("Test Re-Add Other Callback", test_readd_other_callback);
+ 	define_test("Test Timeout", test_timeout);
++	define_test("Test Timeout Remove Self", test_timeout_remove_self);
+ 	return 0;
+ }
+-- 
+cgit 1.3.1-korg
+
