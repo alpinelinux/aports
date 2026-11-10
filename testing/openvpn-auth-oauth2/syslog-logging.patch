@@ -1,0 +1,346 @@
+Patch-Source: https://github.com/jkroepke/openvpn-auth-oauth2/pull/1296
+--
+From 29bf2a60e97f5942b483e475c52e1c8bbe9870f7 Mon Sep 17 00:00:00 2001
+From: Jakub Jirutka <jakub@jirutka.cz>
+Date: Tue, 10 Nov 2026 23:31:59 +0100
+Subject: [PATCH 1/2] feat: add native syslog logging support
+
+Add `syslog` as a supported log format alongside `console` and `json`,
+using Go's standard log/syslog package.
+
+Map slog levels to syslog priorities and omit redundant timestamps and
+severity fields, which are already provided by syslog.
+
+Format log entries as a plain message followed by optional key=value
+attributes, rather than using slog.TextHandler's msg="<message>" format.
+This requires a custom slog handler to preserve structured attributes,
+groups, and proper quoting without parsing or rewriting formatted output.
+
+Normalize embedded newlines to keep each syslog entry on a single line.
+
+The existing logging formats and default behavior remain unchanged.
+
+Signed-off-by: Jakub Jirutka <jakub@jirutka.cz>
+---
+ cmd/openvpn-auth-oauth2/root.go             |   2 +
+ cmd/openvpn-auth-oauth2/syslog_other.go     |  12 ++
+ cmd/openvpn-auth-oauth2/syslog_unix.go      | 130 ++++++++++++++++++++
+ cmd/openvpn-auth-oauth2/syslog_unix_test.go | 111 +++++++++++++++++
+ docs/Configuration.md                       |   2 +-
+ internal/config/flags.go                    |   2 +-
+ 6 files changed, 257 insertions(+), 2 deletions(-)
+ create mode 100644 cmd/openvpn-auth-oauth2/syslog_other.go
+ create mode 100644 cmd/openvpn-auth-oauth2/syslog_unix.go
+ create mode 100644 cmd/openvpn-auth-oauth2/syslog_unix_test.go
+
+diff --git a/cmd/openvpn-auth-oauth2/root.go b/cmd/openvpn-auth-oauth2/root.go
+index 43e113b1..9163db0f 100644
+--- a/cmd/openvpn-auth-oauth2/root.go
++++ b/cmd/openvpn-auth-oauth2/root.go
+@@ -186,6 +186,8 @@ func setupLogger(conf *config.Config, writer io.Writer) (*slog.Logger, error) {
+ 		return slog.New(slog.NewJSONHandler(writer, opts)), nil
+ 	case "console":
+ 		return slog.New(slog.NewTextHandler(writer, opts)), nil
++	case "syslog":
++		return newSyslogLogger(conf.Log.Level)
+ 	default:
+ 		return nil, fmt.Errorf("unknown log format: %s", conf.Log.Format)
+ 	}
+diff --git a/cmd/openvpn-auth-oauth2/syslog_other.go b/cmd/openvpn-auth-oauth2/syslog_other.go
+new file mode 100644
+index 00000000..6d5dc821
+--- /dev/null
++++ b/cmd/openvpn-auth-oauth2/syslog_other.go
+@@ -0,0 +1,12 @@
++//go:build windows && plan9
++
++package main
++
++import (
++	"fmt"
++	"log/slog"
++)
++
++func newSyslogLogger(_ slog.Level) (*slog.Logger, error) {
++	return nil, fmt.Errorf("syslog logging is not supported on this operating system")
++}
+diff --git a/cmd/openvpn-auth-oauth2/syslog_unix.go b/cmd/openvpn-auth-oauth2/syslog_unix.go
+new file mode 100644
+index 00000000..159b50da
+--- /dev/null
++++ b/cmd/openvpn-auth-oauth2/syslog_unix.go
+@@ -0,0 +1,130 @@
++//go:build !windows && !plan9
++
++package main
++
++import (
++	"context"
++	"fmt"
++	"log/slog"
++	"log/syslog"
++	"strconv"
++	"strings"
++	"sync"
++)
++
++// Reuse the same local syslog connection across configuration reloads.
++//
++//nolint:gochecknoglobals // A process-wide connection avoids leaking sockets on reload.
++var openSyslog = sync.OnceValues(func() (*syslog.Writer, error) {
++	return syslog.New(syslog.LOG_DAEMON|syslog.LOG_INFO, "openvpn-auth-oauth2")
++})
++
++func newSyslogLogger(level slog.Level) (*slog.Logger, error) {
++	writer, err := openSyslog()
++	if err != nil {
++		return nil, fmt.Errorf("connect to local syslog: %w", err)
++	}
++
++	return slog.New(syslogHandler{sinks: [4]func(string) error{
++		writer.Debug, writer.Info, writer.Warning, writer.Err,
++	}, level: level}), nil
++}
++
++type syslogHandler struct {
++	sinks [4]func(string) error
++	attrs string // preformatted attributes from WithAttrs
++	group string // prefix for subsequent attributes
++	level slog.Level
++}
++
++func (h syslogHandler) Enabled(_ context.Context, level slog.Level) bool {
++	return level >= h.level
++}
++
++func (h syslogHandler) Handle(_ context.Context, record slog.Record) error {
++	var builder strings.Builder
++
++	builder.WriteString(normalizeSyslogNewlines(record.Message))
++
++	if h.attrs != "" {
++		if builder.Len() > 0 {
++			builder.WriteByte(' ')
++		}
++
++		builder.WriteString(h.attrs)
++	}
++
++	record.Attrs(func(attr slog.Attr) bool {
++		appendSyslogAttr(&builder, h.group, attr)
++
++		return true
++	})
++
++	switch {
++	case record.Level >= slog.LevelError:
++		return h.sinks[3](builder.String())
++	case record.Level >= slog.LevelWarn:
++		return h.sinks[2](builder.String())
++	case record.Level >= slog.LevelInfo:
++		return h.sinks[1](builder.String())
++	default:
++		return h.sinks[0](builder.String())
++	}
++}
++
++func (h syslogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
++	var builder strings.Builder
++
++	builder.WriteString(h.attrs)
++
++	for _, attr := range attrs {
++		appendSyslogAttr(&builder, h.group, attr)
++	}
++
++	h.attrs = builder.String()
++
++	return h
++}
++
++func (h syslogHandler) WithGroup(name string) slog.Handler {
++	if name != "" {
++		h.group += name + "."
++	}
++
++	return h
++}
++
++func appendSyslogAttr(builder *strings.Builder, group string, attr slog.Attr) {
++	if attr.Equal(slog.Attr{}) {
++		return
++	}
++
++	value := attr.Value.Resolve()
++	if value.Kind() == slog.KindGroup {
++		if attr.Key != "" {
++			group += attr.Key + "."
++		}
++
++		for _, nested := range value.Group() {
++			appendSyslogAttr(builder, group, nested)
++		}
++
++		return
++	}
++
++	if builder.Len() > 0 {
++		builder.WriteByte(' ')
++	}
++
++	builder.WriteString(group)
++	builder.WriteString(attr.Key)
++	builder.WriteByte('=')
++	builder.WriteString(strconv.Quote(normalizeSyslogNewlines(value.String())))
++}
++
++func normalizeSyslogNewlines(value string) string {
++	value = strings.ReplaceAll(value, "\r\n", " | ")
++	value = strings.ReplaceAll(value, "\r", " | ")
++
++	return strings.ReplaceAll(value, "\n", " | ")
++}
+diff --git a/cmd/openvpn-auth-oauth2/syslog_unix_test.go b/cmd/openvpn-auth-oauth2/syslog_unix_test.go
+new file mode 100644
+index 00000000..e6173bb0
+--- /dev/null
++++ b/cmd/openvpn-auth-oauth2/syslog_unix_test.go
+@@ -0,0 +1,111 @@
++//go:build !windows && !plan9
++
++package main
++
++import (
++	"context"
++	"errors"
++	"log/slog"
++	"strings"
++	"testing"
++)
++
++func testLogger(level slog.Level, output *[4]string) *slog.Logger {
++	var sinks [4]func(string) error
++
++	for i := range sinks {
++		sinks[i] = func(message string) error {
++			output[i] = message
++
++			return nil
++		}
++	}
++
++	return slog.New(syslogHandler{sinks: sinks, level: level})
++}
++
++func TestSyslogSeverity(t *testing.T) {
++	t.Parallel()
++
++	var got [4]string
++
++	logger := testLogger(slog.LevelDebug, &got).
++		With(slog.String("node", "vpn1")).
++		WithGroup("auth").
++		With(slog.String("user", "alice"))
++
++	for i, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
++		logger.LogAttrs(context.Background(), level, "hello")
++
++		if got[i] != `hello node="vpn1" auth.user="alice"` {
++			t.Fatalf("priority %d: %q", i, got[i])
++		}
++	}
++}
++
++func TestSyslogQuotedNestedAndMultiline(t *testing.T) {
++	t.Parallel()
++
++	var got [4]string
++
++	logger := testLogger(slog.LevelInfo, &got).
++		WithGroup("outer").
++		With(slog.String("base", "one"))
++
++	logger.Info("line1\nline2",
++		slog.Group("inner",
++			slog.String("user", "a b"),
++			slog.Any("err", errors.New("bad\r\nresponse")),
++		),
++	)
++
++	want := `line1 | line2 outer.base="one" outer.inner.user="a b" outer.inner.err="bad | response"`
++
++	if got[1] != want {
++		t.Fatalf("want %q got %q", want, got[1])
++	}
++
++	if strings.Contains(got[1], `\n`) || strings.Contains(got[1], "\n") {
++		t.Fatalf("escaped newlines %q", got[1])
++	}
++}
++
++func TestSyslogFiltering(t *testing.T) {
++	t.Parallel()
++
++	var got [4]string
++
++	logger := testLogger(slog.LevelWarn, &got)
++	logger.Debug("debug")
++	logger.Info("info")
++
++	if got != [4]string{} {
++		t.Fatalf("filtered data: %q", got)
++	}
++
++	logger.Warn("warning")
++
++	if got[2] != "warning" {
++		t.Fatalf("warn: %q", got[2])
++	}
++}
++
++func TestSyslogAlwaysQuotesValues(t *testing.T) {
++	t.Parallel()
++
++	var got [4]string
++
++	logger := testLogger(slog.LevelInfo, &got)
++	logger.Info("sample",
++		slog.String("empty", ""),
++		slog.Int("number", 42),
++		slog.String("equals", "a=b"),
++		slog.String("quote", `a"b`),
++	)
++
++	want := `sample empty="" number="42" equals="a=b" quote="a\"b"`
++
++	if got[1] != want {
++		t.Fatalf("want %q, got %q", want, got[1])
++	}
++}
+diff --git a/docs/Configuration.md b/docs/Configuration.md
+index 0aa87578..f2e1dcd1 100644
+--- a/docs/Configuration.md
++++ b/docs/Configuration.md
+@@ -91,7 +91,7 @@ Usage of openvpn-auth-oauth2:
+   --http.trusted-proxies value
+         Trusted reverse proxy CIDRs allowed to set X-Forwarded-For. Multiple values can be provided as a comma-separated list. (env: OPENVPN_AUTH_OAUTH2_HTTP_TRUSTED_PROXIES)
+   --log.format string
+-        log format. json or console (env: OPENVPN_AUTH_OAUTH2_LOG_FORMAT) (default "console")
++        log format: json, console, or syslog (local syslog, daemon facility) (env: OPENVPN_AUTH_OAUTH2_LOG_FORMAT) (default "console")
+   --log.level value
+         log level. Can be one of: debug, info, warn, error (env: OPENVPN_AUTH_OAUTH2_LOG_LEVEL) (default INFO)
+   --log.vpn-client-ip
+diff --git a/internal/config/flags.go b/internal/config/flags.go
+index d4757574..5f40817e 100644
+--- a/internal/config/flags.go
++++ b/internal/config/flags.go
+@@ -38,7 +38,7 @@ func (c *Config) flagSetLog(flagSet *flag.FlagSet) {
+ 		&c.Log.Format,
+ 		"log.format",
+ 		c.Log.Format,
+-		"log format. json or console",
++		"log format: json, console, or syslog (local syslog, daemon facility)",
+ 	)
+ 	flagSet.TextVar(
+ 		&c.Log.Level,
+
