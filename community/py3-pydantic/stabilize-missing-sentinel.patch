@@ -1,0 +1,277 @@
+Patch-Source: https://github.com/pydantic/pydantic/pull/13782
+Backported for 2.12.5.
+---
+diff --git a/pydantic/__init__.py b/pydantic/__init__.py
+index 01212849e73..10bb2f72458 100644
+--- a/pydantic/__init__.py
++++ b/pydantic/__init__.py
+@@ -58,11 +58,12 @@
+         PydanticDeprecatedSince210,
+         PydanticDeprecatedSince211,
+         PydanticDeprecatedSince212,
++        PydanticDeprecatedSince214,
+         PydanticDeprecationWarning,
+         PydanticExperimentalWarning,
+     )
+ 
+-    # this encourages pycharm to import `ValidationError` from here, not pydantic_core
++    MISSING = pydantic_core.MISSING
+     ValidationError = pydantic_core.ValidationError
+     from .deprecated.class_validators import root_validator, validator
+     from .deprecated.config import BaseConfig, Extra
+@@ -230,12 +231,14 @@
+     'PydanticDeprecatedSince210',
+     'PydanticDeprecatedSince211',
+     'PydanticDeprecatedSince212',
++    'PydanticDeprecatedSince214',
+     'PydanticDeprecationWarning',
+     'PydanticExperimentalWarning',
+     # annotated handlers
+     'GetCoreSchemaHandler',
+     'GetJsonSchemaHandler',
+     # pydantic_core
++    'MISSING',
+     'ValidationError',
+     'ValidationInfo',
+     'SerializationInfo',
+@@ -393,12 +396,14 @@
+     'PydanticDeprecatedSince210': (__spec__.parent, '.warnings'),
+     'PydanticDeprecatedSince211': (__spec__.parent, '.warnings'),
+     'PydanticDeprecatedSince212': (__spec__.parent, '.warnings'),
++    'PydanticDeprecatedSince214': (__spec__.parent, '.warnings'),
+     'PydanticDeprecationWarning': (__spec__.parent, '.warnings'),
+     'PydanticExperimentalWarning': (__spec__.parent, '.warnings'),
+     # annotated handlers
+     'GetCoreSchemaHandler': (__spec__.parent, '.annotated_handlers'),
+     'GetJsonSchemaHandler': (__spec__.parent, '.annotated_handlers'),
+     # pydantic_core stuff
++    'MISSING': ('pydantic_core', '.'),
+     'ValidationError': ('pydantic_core', '.'),
+     'ValidationInfo': ('pydantic_core', '.core_schema'),
+     'SerializationInfo': ('pydantic_core', '.core_schema'),
+diff --git a/pydantic/experimental/missing_sentinel.py b/pydantic/experimental/missing_sentinel.py
+index 3e7f820ceda..4e165c888f3 100644
+--- a/pydantic/experimental/missing_sentinel.py
++++ b/pydantic/experimental/missing_sentinel.py
+@@ -1,5 +1,28 @@
+-"""Experimental module exposing a function a `MISSING` sentinel."""
++"""Experimental module exposing the `MISSING` sentinel.
+ 
+-from pydantic_core import MISSING
++!!! warning "Deprecated"
++    The `MISSING` sentinel is no longer experimental, and should be imported from the main `pydantic` module.
++"""
++
++import warnings
++from typing import TYPE_CHECKING, Any
++
++from ..warnings import PydanticDeprecatedSince214
++
++if TYPE_CHECKING:
++    from pydantic_core import MISSING
+ 
+ __all__ = ('MISSING',)
++
++
++def __getattr__(name: str) -> Any:
++    if name == 'MISSING':
++        warnings.warn(
++            'The `MISSING` sentinel is no longer experimental. Import it from the main `pydantic` module instead.',
++            category=PydanticDeprecatedSince214,
++            stacklevel=2,
++        )
++        from pydantic_core import MISSING
++
++        return MISSING
++    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+diff --git a/pydantic/types.py b/pydantic/types.py
+index a12b1910031..b6a3db70a84 100644
+--- a/pydantic/types.py
++++ b/pydantic/types.py
+@@ -3311,22 +3311,72 @@ def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHa
+ 
+ 
+ OnErrorOmit = Annotated[T, _OnErrorOmit]
+-"""
+-When used as an item in a list, the key type in a dict, optional values of a TypedDict, etc.
+-this annotation omits the item from the iteration if there is any error validating it.
+-That is, instead of a [`ValidationError`][pydantic_core.ValidationError] being propagated up and the entire iterable being discarded
+-any invalid items are discarded and the valid ones are returned.
++"""Discard the invalid items of a collection instead of failing validation.
++
++/// version-added | v2.6
++///
++
++By default, when an item of a collection (such as a list, a dictionary or a [`TypedDict`][typing.TypedDict])
++fails validation, a [`ValidationError`][pydantic_core.ValidationError] is raised and the whole collection is
++discarded. This annotation changes this behavior: any item failing validation is silently omitted from the
++result, and the valid ones are kept.
++
++It can be applied to:
++
++* the item type of an iterable (e.g. `list[OnErrorOmit[int]]`, `tuple[OnErrorOmit[int], ...]`).
++* the key and/or value types of a mapping (e.g. `dict[OnErrorOmit[int], str]`). If either the key or the value of
++  an entry fails validation, the whole entry is omitted.
++* the value type of a [*not required*][typing.NotRequired] [`TypedDict`][typing.TypedDict] key.
++  Using it on a required key is not allowed, as it would make the key effectively optional.
++
++```python
++from typing import NotRequired, TypedDict
++
++from pydantic import BaseModel, OnErrorOmit
++
++OmittableInt = OnErrorOmit[int]
++
++class Settings(TypedDict):
++    timeout: NotRequired[OmittableInt]
++
++class Model(BaseModel):
++    ids: list[OmittableInt]
++    scores: dict[str, OnErrorOmit[float]]
++    settings: Settings
++
++model = Model(
++    ids=[1, 2, 'a', 3],
++    scores={'a': 1.5, 'b': 'invalid'},
++    settings={'timeout': 'invalid'},
++)
++print(model)
++#> ids=[1, 2, 3] scores={'a': 1.5} settings={}
++```
++
++!!! note
++    The omitted items are discarded silently: no error is reported and there is no way to know
++    which items were invalid. If you need to keep track of them, use a
++    [wrap validator](../concepts/validators.md#field-wrap-validator) instead.
++
++!!! warning
++    `OnErrorOmit` is only meaningful when the annotated type is part of a collection.
++    Using it on a top-level type (e.g. `TypeAdapter(OnErrorOmit[int])`) or on a model field is not supported.
+ """
+ 
+ 
+ @_dataclasses.dataclass
+ class FailFast(_fields.PydanticMetadata, BaseMetadata):
+-    """A `FailFast` annotation can be used to specify that validation should stop at the first error.
++    """Stop validating a collection at the first invalid item, instead of collecting the errors of every item.
++
++    /// version-added | v2.8
++    ///
+ 
+-    This can be useful when you want to validate a large amount of data and you only need to know if it's valid or not.
++    By default, when validating a collection, Pydantic validates every item and reports all the errors
++    at once. This annotation can be applied to a collection type (such as a [`list`][], a [`tuple`][],
++    a [`set`][] or a [`dict`][]) to stop as soon as an item fails validation.
+ 
+-    You might want to enable this setting if you want to validate your data faster (basically, if you use this,
+-    validation will be more performant with the caveat that you get less information).
++    This can be useful when you want to validate a large amount of data and you only need to know if it's valid or not:
++    validation will be faster, with the caveat that you get less information about the errors.
+ 
+     ```python
+     from typing import Annotated
+diff --git a/pydantic/warnings.py b/pydantic/warnings.py
+index 02323b8da59..6115f387b43 100644
+--- a/pydantic/warnings.py
++++ b/pydantic/warnings.py
+@@ -11,6 +11,7 @@
+     'PydanticDeprecatedSince210',
+     'PydanticDeprecatedSince211',
+     'PydanticDeprecatedSince212',
++    'PydanticDeprecatedSince214',
+     'PydanticDeprecationWarning',
+     'PydanticExperimentalWarning',
+     'ArbitraryTypeWarning',
+@@ -95,6 +96,13 @@ def __init__(self, message: str, *args: object) -> None:
+         super().__init__(message, *args, since=(2, 12), expected_removal=(3, 0))
+ 
+ 
++class PydanticDeprecatedSince214(PydanticDeprecationWarning):
++    """A specific `PydanticDeprecationWarning` subclass defining functionality deprecated since Pydantic 2.14."""
++
++    def __init__(self, message: str, *args: object) -> None:
++        super().__init__(message, *args, since=(2, 14), expected_removal=(3, 0))
++
++
+ class GenericBeforeBaseModelWarning(Warning):
+     pass
+ 
+diff --git a/tests/test_missing_sentinel.py b/tests/test_missing_sentinel.py
+index afc682a..e3fe501 100644
+--- a/tests/test_missing_sentinel.py
++++ b/tests/test_missing_sentinel.py
+@@ -2,9 +2,9 @@ import pickle
+ from typing import Union
+ 
+ import pytest
+-from pydantic_core import MISSING, PydanticSerializationUnexpectedValue
++from pydantic_core import PydanticSerializationUnexpectedValue
+ 
+-from pydantic import BaseModel, TypeAdapter, ValidationError
++from pydantic import MISSING, BaseModel, Field, PydanticDeprecatedSince214, TypeAdapter, ValidationError
+ 
+ 
+ def test_missing_sentinel_model() -> None:
+@@ -52,14 +52,6 @@ class ModelPickle(BaseModel):
+     f: Union[int, MISSING] = MISSING
+ 
+ 
+-@pytest.mark.xfail(reason="PEP 661 sentinels aren't picklable yet in the experimental typing-extensions implementation")
+-def test_missing_sentinel_pickle() -> None:
+-    m = ModelPickle()
+-    m_reconstructed = pickle.loads(pickle.dumps(m))
+-
+-    assert m_reconstructed.f is MISSING
+-
+-
+ def test_missing_sentinel_json_schema() -> None:
+     class Model(BaseModel):
+         f: Union[int, MISSING] = MISSING
+@@ -71,6 +63,13 @@ def test_missing_sentinel_json_schema() -> None:
+     }
+ 
+ 
++def test_missing_sentinel_experimental_import_deprecated() -> None:
++    import pydantic.experimental.missing_sentinel as experimental_module
++
++    with pytest.warns(PydanticDeprecatedSince214, match='The `MISSING` sentinel is no longer experimental'):
++        assert experimental_module.MISSING is MISSING
++
++
+ def test_model_construct_with_missing_default_does_not_crash() -> None:
+     class M(BaseModel):
+         a: Union[int, MISSING] = MISSING
+diff --git a/pydantic/types.py b/pydantic/types.py
+index b6a3db70a84..b6b69855104 100644
+--- a/pydantic/types.py
++++ b/pydantic/types.py
+@@ -3330,7 +3330,7 @@ def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHa
+   Using it on a required key is not allowed, as it would make the key effectively optional.
+ 
+ ```python
+-from typing import NotRequired, TypedDict
++from typing_extensions import NotRequired, TypedDict
+ 
+ from pydantic import BaseModel, OnErrorOmit
+ 
+
+From cc69ab7ecd0a382b11b9832fff9822ea71725b7b Mon Sep 17 00:00:00 2001
+From: Viicos <65306057+Viicos@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 21:51:07 +0200
+Subject: [PATCH 3/3] coverage
+
+---
+ pydantic/experimental/missing_sentinel.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/pydantic/experimental/missing_sentinel.py b/pydantic/experimental/missing_sentinel.py
+index 4e165c888f3..c92888d0a4b 100644
+--- a/pydantic/experimental/missing_sentinel.py
++++ b/pydantic/experimental/missing_sentinel.py
+@@ -25,4 +25,5 @@ def __getattr__(name: str) -> Any:
+         from pydantic_core import MISSING
+ 
+         return MISSING
+-    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
++    else:  # pragma: no cover
++        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
