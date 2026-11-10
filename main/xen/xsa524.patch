@@ -1,0 +1,120 @@
+From: Jan Beulich <jbeulich@suse.com>
+Subject: AMD/IOMMU: allocate (at least) one spare device table entry
+
+Certain IOMMUs have an off-by-one in the upper bounds check of device
+table accesses. Therefore an extra entry is needed, to avoid the IOMMU
+accessing random unrelated memory.
+
+Since the size is reported to the IOMMU in 4k granularity, an extra page
+may need allocating. To keep things simple (as before: full order-N
+allocations), arrange to allocate the next higher order of pages if/as
+necessary. At the same time avoid using / reporting the extra entries.
+
+As struct table_struct's alloc_size field is now only ever written, drop
+the field right away (if for nothing else than to avoid possible Misra
+concerns).
+
+This is CVE-2024-21963 / XSA-524.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Andrew Cooper <andrew.cooper3@citrix.com>
+
+diff --git a/xen/drivers/passthrough/amd/iommu-defs.h b/xen/drivers/passthrough/amd/iommu-defs.h
+index 30b094f18768..72c757918531 100644
+--- a/xen/drivers/passthrough/amd/iommu-defs.h
++++ b/xen/drivers/passthrough/amd/iommu-defs.h
+@@ -104,7 +104,7 @@ struct amd_iommu_dte {
+     /* 0 - 63 */
+     bool v:1;
+     bool tv:1;
+-    unsigned int :5;
++    unsigned int rsvd:5;
+     unsigned int had:2;
+ #define IOMMU_MAX_PT_LEVELS 6
+     unsigned int paging_mode:3;
+diff --git a/xen/drivers/passthrough/amd/iommu.h b/xen/drivers/passthrough/amd/iommu.h
+index 52f748310be4..042c6eed59b2 100644
+--- a/xen/drivers/passthrough/amd/iommu.h
++++ b/xen/drivers/passthrough/amd/iommu.h
+@@ -54,7 +54,6 @@ typedef struct cmd_entry
+ struct table_struct {
+     void *buffer;
+     unsigned long entries;
+-    unsigned long alloc_size;
+ };
+ 
+ struct ring_buffer {
+diff --git a/xen/drivers/passthrough/amd/iommu_init.c b/xen/drivers/passthrough/amd/iommu_init.c
+index e0c8925c33f7..9376ca612099 100644
+--- a/xen/drivers/passthrough/amd/iommu_init.c
++++ b/xen/drivers/passthrough/amd/iommu_init.c
+@@ -80,7 +80,9 @@ static void register_iommu_dev_table_in_mmio_space(struct amd_iommu *iommu)
+ 
+     entry = 0;
+     iommu_set_addr_lo_to_reg(&entry, addr_lo >> PAGE_SHIFT);
+-    set_field_in_reg_u32((iommu->dev_table.alloc_size / PAGE_SIZE) - 1,
++    set_field_in_reg_u32(ROUNDUP(iommu->dev_table.entries *
++                                 IOMMU_DEV_TABLE_ENTRY_SIZE,
++                                 PAGE_SIZE) - 1,
+                          entry, IOMMU_DEV_TABLE_SIZE_MASK,
+                          IOMMU_DEV_TABLE_SIZE_SHIFT, &entry);
+     writel(entry, iommu->mmio_base + IOMMU_DEV_TABLE_BASE_LOW_OFFSET);
+@@ -948,8 +950,21 @@ static void disable_iommu(struct amd_iommu *iommu)
+ 
+ static unsigned int __init dt_alloc_size(void)
+ {
+-    return PAGE_SIZE << get_order_from_bytes(ivrs_bdf_entries *
+-                                             IOMMU_DEV_TABLE_ENTRY_SIZE);
++    unsigned int nr = ROUNDUP(ivrs_bdf_entries,
++                              PAGE_SIZE / IOMMU_DEV_TABLE_ENTRY_SIZE);
++
++    /*
++     * AMD SN-3060 / CVE-2024-21963
++     *
++     * Some IOMMUs read beyond the programmed Device Table limit.  When the
++     * total size of the Device Table is less than 2M (covering all 2^16 BDFs
++     * in a single PCI Segment), we must allocate one extra entry to avoid the
++     * IOMMU reading unrelated memory and treating it as a valid entry.
++     */
++    if ( nr < (1U << 16) )
++        ++nr;
++
++    return PAGE_SIZE << get_order_from_bytes(nr * IOMMU_DEV_TABLE_ENTRY_SIZE);
+ }
+ 
+ static void __init deallocate_buffer(void *buf, unsigned long sz)
+@@ -1089,9 +1104,8 @@ static int __init amd_iommu_init_one(struct amd_iommu *iommu, bool intr)
+     if ( !IVRS_MAPPINGS_DEVTAB(ivrs_mappings) )
+         goto error_out;
+ 
+-    iommu->dev_table.alloc_size = dt_alloc_size();
+-    iommu->dev_table.entries = iommu->dev_table.alloc_size /
+-                               IOMMU_DEV_TABLE_ENTRY_SIZE;
++    /* There may be trailing "scratch" entries, which should not be used. */
++    iommu->dev_table.entries = ivrs_bdf_entries;
+     iommu->dev_table.buffer = IVRS_MAPPINGS_DEVTAB(ivrs_mappings);
+ 
+     enable_iommu(iommu);
+@@ -1255,11 +1269,21 @@ static int __init cf_check amd_iommu_setup_device_table(
+          * IOMMU_DEV_TABLE_INT_CONTROL_ABORTED all being zero, and us also
+          * wanting at least TV, GV, I, and EX set to false.
+          */
+-        for ( bdf = 0, size /= sizeof(*dt); bdf < size; ++bdf )
++        for ( bdf = 0; bdf < ivrs_bdf_entries; ++bdf )
+             dt[bdf] = (struct amd_iommu_dte){
+                           .v = true,
+                           .iv = iommu_intremap,
+                       };
++
++        /*
++         * Prefill extra DTEs such that their use will raise an
++         * ILLEGAL_DEV_TABLE_ENTRY event.
++         */
++        for ( size /= sizeof(*dt); bdf < size; ++bdf )
++            dt[bdf] = (struct amd_iommu_dte){
++                          .v = true,
++                          .rsvd = 3, /* As per AMD recommendation. */
++                      };
+     }
+ 
+     /* Add device table entries */

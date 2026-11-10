@@ -1,0 +1,107 @@
+From: Andrew Cooper <andrew.cooper3@citrix.com>
+Subject: x86/spec-ctrl: Mitigate the new TSA-Fill variant
+
+A new variant of TSA has been found, affecting only Zen5 CPUs.
+
+Updated microcode has been issued.  Unlike the original TSA, this microcode
+does enumerate VERW_CLEAR, so Xen does not need a table of microcode
+revisions.  The handling of VERW_CLEAR for guests is the same as before.
+
+A new CPUID bit, TSA_FILL_NO, indicates that the system is unaffected.  It is
+expected to be set on all Zen6 and later systems.  Zen4 and older are believed
+to be unaffected, and need to synthesise the bit for guests.
+
+This is CVE-2026-0004, part of XSA-525.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Roger Pau Monné <roger@xenproject.org>
+
+diff --git a/xen/arch/x86/include/asm/cpufeature.h b/xen/arch/x86/include/asm/cpufeature.h
+index 4933ad234f78..23a2614634d8 100644
+--- a/xen/arch/x86/include/asm/cpufeature.h
++++ b/xen/arch/x86/include/asm/cpufeature.h
+@@ -245,6 +245,7 @@ static inline bool boot_cpu_has(unsigned int feat)
+ /* CPUID level 0x80000021.ecx */
+ #define cpu_has_tsa_sq_no       boot_cpu_has(X86_FEATURE_TSA_SQ_NO)
+ #define cpu_has_tsa_l1_no       boot_cpu_has(X86_FEATURE_TSA_L1_NO)
++#define cpu_has_tsa_fill_no     boot_cpu_has(X86_FEATURE_TSA_FILL_NO)
+ 
+ /* Synthesized. */
+ #define cpu_has_arch_perfmon    boot_cpu_has(X86_FEATURE_ARCH_PERFMON)
+diff --git a/xen/arch/x86/spec_ctrl.c b/xen/arch/x86/spec_ctrl.c
+index 3132752090da..fb015cac5e8f 100644
+--- a/xen/arch/x86/spec_ctrl.c
++++ b/xen/arch/x86/spec_ctrl.c
+@@ -510,7 +510,7 @@ static void __init print_details(enum ind_thunk thunk)
+      * Hardware read-only information, stating immunity to certain issues, or
+      * suggestions of which mitigation to use.
+      */
+-    printk("  Hardware hints:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
++    printk("  Hardware hints:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+            (caps & ARCH_CAPS_RDCL_NO)                        ? " RDCL_NO"        : "",
+            (caps & ARCH_CAPS_EIBRS)                          ? " EIBRS"          : "",
+            (caps & ARCH_CAPS_RSBA)                           ? " RSBA"           : "",
+@@ -537,7 +537,8 @@ static void __init print_details(enum ind_thunk thunk)
+            (e21a & cpufeat_mask(X86_FEATURE_SRSO_NO))        ? " SRSO_NO"        : "",
+            (e21a & cpufeat_mask(X86_FEATURE_SRSO_US_NO))     ? " SRSO_US_NO"     : "",
+            (e21c & cpufeat_mask(X86_FEATURE_TSA_SQ_NO))      ? " TSA_SQ_NO"      : "",
+-           (e21c & cpufeat_mask(X86_FEATURE_TSA_L1_NO))      ? " TSA_L1_NO"      : "");
++           (e21c & cpufeat_mask(X86_FEATURE_TSA_L1_NO))      ? " TSA_L1_NO"      : "",
++           (e21c & cpufeat_mask(X86_FEATURE_TSA_FILL_NO))    ? " TSA_FILL_NO"    : "");
+ 
+     /* Hardware features which need driving to mitigate issues. */
+     printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+@@ -1524,6 +1525,33 @@ static void __init tsa_sq_l1_calculations(void)
+         setup_force_cpu_cap(X86_FEATURE_VERW_CLEAR);
+ }
+ 
++/*
++ * Transient Scheduler Attacks (L1-Fill)
++ *
++ * https://www.amd.com/content/dam/amd/en/documents/resources/bulletin/technical-guidance-for-mitigating-transient-scheduler-attacks.pdf
++ */
++static void __init tsa_fill_calculations(void)
++{
++    /* TSA is only known to affect AMD processors at this time. */
++    if ( boot_cpu_data.vendor != X86_VENDOR_AMD )
++        return;
++
++    /* If we're virtualised, don't attempt to synthesise anything. */
++    if ( cpu_has_hypervisor )
++        return;
++
++    /*
++     * Zen6 and later CPUs are expected to enumerate TSA_FILL_NO.
++     *
++     * Zen5 CPUs are vulnerable and get VERW_CLEAR in microcode.
++     *
++     * Zen4 and earlier are not believed to be affected, but do not enumerate
++     * TSA_FILL_NO.  Synthesise it.
++     */
++    if ( boot_cpu_data.family < 0x1a )
++        setup_force_cpu_cap(X86_FEATURE_TSA_FILL_NO);
++}
++
+ static bool __init cpu_has_gds(void)
+ {
+     /*
+@@ -2265,6 +2293,7 @@ void __init init_speculation_mitigations(void)
+     mds_calculations();
+     rfds_calculations();
+     tsa_sq_l1_calculations();
++    tsa_fill_calculations();
+ 
+     /*
+      * Parts which enumerate FB_CLEAR are those with now-updated microcode
+diff --git a/xen/include/public/arch-x86/cpufeatureset.h b/xen/include/public/arch-x86/cpufeatureset.h
+index d750b490098e..fb65548381ab 100644
+--- a/xen/include/public/arch-x86/cpufeatureset.h
++++ b/xen/include/public/arch-x86/cpufeatureset.h
+@@ -404,6 +404,7 @@ XEN_CPUFEATURE(ITS_NO,             16*32+62) /*!A No Indirect Target Selection *
+ /* AMD-defined CPU features, CPUID level 0x80000021.ecx, word 18 */
+ XEN_CPUFEATURE(TSA_SQ_NO,          18*32+ 1) /*!A No Store Queue Transitive Scheduler Attacks */
+ XEN_CPUFEATURE(TSA_L1_NO,          18*32+ 2) /*!A No L1D Transitive Scheduler Attacks */
++XEN_CPUFEATURE(TSA_FILL_NO,        18*32+ 7) /*A  No L1D-Fill Transitive Scheduler Attacks */
+ 
+ #endif /* XEN_CPUFEATURE */
+ 
