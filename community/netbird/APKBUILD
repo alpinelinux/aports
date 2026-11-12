@@ -22,6 +22,7 @@ $pkgname-relay
 $pkgname-mgmt-openrc
 $pkgname-signal-openrc
 $pkgname-relay-openrc
+$pkgname-ui
 "
 install="
 $pkgname.pre-install
@@ -42,60 +43,46 @@ netbird-relay.confd
 netbird-signal.confd
 "
 
-case "$CARCH" in
-x86 | s390x)
-	# on s390x and x86, ui build fails in
-	# client/ui/frontend/node_modules/.pnpm/rollup@4.60.4/node_modules/rollup/dist/native.js
-	# -- platform/architecture not supported by native rollup build.
-	# building via WASM might work, but for now, disable UI build on those arches.
-	;;
-*)
-	subpackages="$subpackages $pkgname-ui"
-	;;
-esac
+_build_frontend() {
+	local esbuild_ver=$(esbuild --version)
+	# override pnpm settings and regenerate lockfile to avoid
+	# native binary downloads and to force use of system esbuild
+	ESBUILD_VER=$esbuild_ver \
+		envsubst '$ESBUILD_VER' <"$srcdir"/pnpm-workspace.yaml >client/ui/frontend/pnpm-workspace.yaml
+	export ESBUILD_BINARY_PATH=/usr/lib/node_modules/esbuild/bin/esbuild
+	pnpm -C client/ui/frontend install --lockfile-only
+
+	# XXX: packaging wails3 is probably a good idea at some point,
+	# instead of this
+	go build -mod=mod -o bin/wails3 github.com/wailsapp/wails/v3/cmd/wails3
+	# client/ui/build install:frontend:deps has a "pnpm --version"
+	# precondition, which fails on armv7, armhf, loongarch64,
+	# ppc64le, and riscv64 with
+	# 	[ERROR] Cannot verify the identity of the @pnpm/exe.linux-arm native binary: it is missing from pnpm-lock.yaml.
+	# this is https://github.com/pnpm/pnpm/issues/13622 and it
+	# happens because package.json sets packageManager to a
+	# specific version of pnpm. so, remove packageManager from
+	# package.json before trying to build the ui, so that it will
+	# use the system-installed pnpm.
+	jq 'del(.packageManager)' client/ui/frontend/package.json >tmp.json
+	mv tmp.json client/ui/frontend/package.json
+	# downloads from "pnpm install" while go-task is doing other
+	# stuff often hit ERR_PNPM_ERR_OUT_OF_RANGE or
+	# ERR_PNPM_ERR_BUFFER_OUT_OF_BOUNDS on riscv64 CI; predownload
+	# to work around that
+	pnpm -C client/ui/frontend fetch
+	PATH=$PWD/bin:$PATH go-task -d client/ui common:build:frontend
+}
 
 build() {
-	local build_ui=""
 	mkdir -p build bin
-	case "$subpackages" in
-	*$pkgname-ui*)
-		build_ui=./client/ui
 
-		local esbuild_ver=$(esbuild --version)
-		# override pnpm settings and regenerate lockfile to avoid
-		# native binary downloads and to force use of system esbuild
-		ESBUILD_VER=$esbuild_ver \
-			envsubst '$ESBUILD_VER' <"$srcdir"/pnpm-workspace.yaml >client/ui/frontend/pnpm-workspace.yaml
-		export ESBUILD_BINARY_PATH=/usr/lib/node_modules/esbuild/bin/esbuild
-		pnpm -C client/ui/frontend install --lockfile-only
-
-		# XXX: packaging wails3 is probably a good idea at some point,
-		# instead of this
-		go build -mod=mod -o bin/wails3 github.com/wailsapp/wails/v3/cmd/wails3
-		# client/ui/build install:frontend:deps has a "pnpm --version"
-		# precondition, which fails on armv7, armhf, loongarch64,
-		# ppc64le, and riscv64 with
-		# 	[ERROR] Cannot verify the identity of the @pnpm/exe.linux-arm native binary: it is missing from pnpm-lock.yaml.
-		# this is https://github.com/pnpm/pnpm/issues/13622 and it
-		# happens because package.json sets packageManager to a
-		# specific version of pnpm. so, remove packageManager from
-		# package.json before trying to build the ui, so that it will
-		# use the system-installed pnpm.
-		jq 'del(.packageManager)' client/ui/frontend/package.json >tmp.json
-		mv tmp.json client/ui/frontend/package.json
-		# downloads from "pnpm install" while go-task is doing other
-		# stuff often hit ERR_PNPM_ERR_OUT_OF_RANGE or
-		# ERR_PNPM_ERR_BUFFER_OUT_OF_BOUNDS on riscv64 CI; predownload
-		# to work around that
-		pnpm -C client/ui/frontend fetch
-		PATH=$PWD/bin:$PATH go-task -d client/ui common:build:frontend
-		;;
-	esac
+	_build_frontend
 
 	go build -v -o build \
 		-tags wayland \
 		-ldflags "-X github.com/netbirdio/netbird/version.version=$pkgver -extldflags \"$LDFLAGS\"" \
-		./client $build_ui ./management ./signal ./relay
+		./client ./client/ui ./management ./signal ./relay
 }
 
 _install_completions() {
