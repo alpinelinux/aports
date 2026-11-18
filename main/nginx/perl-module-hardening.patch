@@ -1,0 +1,481 @@
+Patch-Source: https://github.com/nginx/nginx/commit/14249f8532cd1112673a3fe02065011707f19c29
+Patch-Source: https://github.com/nginx/nginx/commit/2e9cc8bcc3277bd17bf817539d64fba3c8d693b7
+Patch-Source: https://github.com/nginx/nginx/commit/450dd314c66e4caae0eaff572ae0cd88e5b7acb9
+Patch-Source: https://github.com/nginx/nginx/commit/a18b3f170ce8796a732ca9f93b969e87e5c5f275
+--
+From 9a3bfe37f27ca5185aceafac73b514ad4b576aa5 Mon Sep 17 00:00:00 2001
+From: Maxim Dounin <mdounin@mdounin.ru>
+Date: Fri, 26 Jun 2026 22:23:25 +0300
+Subject: [PATCH] Perl: added handler type checks
+
+Previously, calling $r->sleep() and $r->has_request_body() with an
+invalid handler argument, such as a string, resulted in a segmentation
+fault.
+
+Signed-off-by: Sergey Kandaurov <pluknet@nginx.com>
+Origin: https://freenginx.org/hg/nginx/rev/2442b26850b1
+(cherry picked from commit 14249f8532cd1112673a3fe02065011707f19c29)
+---
+ src/http/modules/perl/nginx.xs | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/src/http/modules/perl/nginx.xs b/src/http/modules/perl/nginx.xs
+index fd59e29ea..1fcb32e73 100644
+--- a/src/http/modules/perl/nginx.xs
++++ b/src/http/modules/perl/nginx.xs
+@@ -395,6 +395,7 @@ has_request_body(r, next)
+     dXSTARG;
+     ngx_http_request_t   *r;
+     ngx_http_perl_ctx_t  *ctx;
++    SV                   *next;
+     ngx_int_t             rc;
+ 
+     ngx_http_perl_set_request(r, ctx);
+@@ -411,7 +412,13 @@ has_request_body(r, next)
+         XSRETURN_UNDEF;
+     }
+ 
+-    ctx->next = SvRV(ST(1));
++    next = ST(1);
++
++    if (!SvROK(next) || SvTYPE(SvRV(next)) != SVt_PVCV) {
++        croak("has_request_body(): no handler provided");
++    }
++
++    ctx->next = SvRV(next);
+ 
+     r->request_body_in_single_buf = 1;
+     r->request_body_in_persistent_file = 1;
+@@ -1129,6 +1136,7 @@ sleep(r, sleep, next)
+ 
+     ngx_http_request_t   *r;
+     ngx_http_perl_ctx_t  *ctx;
++    SV                   *next;
+     ngx_msec_t            sleep;
+ 
+     ngx_http_perl_set_request(r, ctx);
+@@ -1146,7 +1154,13 @@ sleep(r, sleep, next)
+     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                    "perl sleep: %M", sleep);
+ 
+-    ctx->next = SvRV(ST(2));
++    next = ST(2);
++
++    if (!SvROK(next) || SvTYPE(SvRV(next)) != SVt_PVCV) {
++        croak("sleep(): no handler provided");
++    }
++
++    ctx->next = SvRV(next);
+ 
+     r->connection->write->delayed = 1;
+     ngx_add_timer(r->connection->write, sleep);
+-- 
+2.56.0
+
+From bb45c53e94b2a0a8be3ec9e2bb4203473021dfae Mon Sep 17 00:00:00 2001
+From: Maxim Dounin <mdounin@mdounin.ru>
+Date: Fri, 26 Jun 2026 22:23:28 +0300
+Subject: [PATCH] Perl: introduced reference counting for perl scalars
+
+Perl scalars might have a limited lifetime, and using them without
+appropriate reference counting is incorrect.  In particular, heap
+use-after-free was observed in the following configuration (note the
+"eval", which limits lifetime of the string being printed), which
+demonstrates that the previously used SvREADONLY() optimizations are
+incorrect:
+
+    location / {
+        perl 'sub {
+            my $r = shift;
+            $r->send_http_header;
+            eval q!$r->print("it works")!;
+            return OK;
+        }';
+    }
+
+Similarly, errors were observed with handlers in $r->sleep() and
+$r->has_request_body() when a handler comes from an eval, such as in
+the following configuration:
+
+    location / {
+        perl 'sub {
+            my $r = shift;
+            $r->sleep(100, eval q!sub {
+                my $r = shift;
+                $r->send_http_header;
+                $r->print("it works");
+                return OK;
+            }!);
+            return OK;
+        }';
+    }
+
+Accordingly, the SvREADONLY() optimization was removed in
+ngx_http_perl_sv2str(), since it is expected to be used for small
+strings, and using proper reference counting likely will be more costly
+than just copying the string.  In $r->print(), $r->sleep(), and
+$r->has_request_body() proper reference counting was implemented, with
+decrement operations being performed by pool cleanup handlers.
+
+As a positive side effect, $r->print() can now avoid copying any single
+scalar, not just read-only scalars.
+
+Reported by Evan Hellman,
+https://github.com/freenginx/nginx/issues/26
+
+Signed-off-by: Sergey Kandaurov <pluknet@nginx.com>
+Origin: https://freenginx.org/hg/nginx/rev/7a3dbb7905ad
+(cherry picked from commit 2e9cc8bcc3277bd17bf817539d64fba3c8d693b7)
+---
+ src/http/modules/perl/nginx.xs               | 56 +++++++++++++++-----
+ src/http/modules/perl/ngx_http_perl_module.c | 23 ++++++++
+ src/http/modules/perl/ngx_http_perl_module.h |  7 +++
+ 3 files changed, 73 insertions(+), 13 deletions(-)
+
+diff --git a/src/http/modules/perl/nginx.xs b/src/http/modules/perl/nginx.xs
+index 1fcb32e73..6acc4f8a0 100644
+--- a/src/http/modules/perl/nginx.xs
++++ b/src/http/modules/perl/nginx.xs
+@@ -41,16 +41,6 @@ ngx_http_perl_sv2str(pTHX_ ngx_http_request_t *r, ngx_str_t *s, SV *sv)
+     p = (u_char *) SvPV(sv, len);
+ 
+     s->len = len;
+-
+-    if (SvREADONLY(sv) && SvPOK(sv)) {
+-        s->data = p;
+-
+-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+-                       "perl sv2str: %08XD \"%V\"", sv->sv_flags, s);
+-
+-        return NGX_OK;
+-    }
+-
+     s->data = ngx_pnalloc(r->pool, len);
+     if (s->data == NULL) {
+         return NGX_ERROR;
+@@ -65,6 +55,29 @@ ngx_http_perl_sv2str(pTHX_ ngx_http_request_t *r, ngx_str_t *s, SV *sv)
+ }
+ 
+ 
++static ngx_int_t
++ngx_http_perl_refcount(pTHX_ ngx_http_request_t *r, SV *sv)
++{
++    ngx_pool_cleanup_t       *cln;
++    ngx_http_perl_cleanup_t  *clnp;
++
++    cln = ngx_pool_cleanup_add(r->pool, sizeof(ngx_http_perl_cleanup_t));
++    if (cln == NULL) {
++        return NGX_ERROR;
++    }
++
++    cln->handler = ngx_http_perl_refcount_cleanup;
++
++    clnp = cln->data;
++    clnp->request = r;
++    clnp->sv = sv;
++
++    SvREFCNT_inc(sv);
++
++    return NGX_OK;
++}
++
++
+ static ngx_int_t
+ ngx_http_perl_output(ngx_http_request_t *r, ngx_http_perl_ctx_t *ctx,
+     ngx_buf_t *b)
+@@ -420,6 +433,12 @@ has_request_body(r, next)
+ 
+     ctx->next = SvRV(next);
+ 
++    if (ngx_http_perl_refcount(aTHX_ r, ctx->next) != NGX_OK) {
++        ctx->error = 1;
++        ctx->next = NULL;
++        croak("ngx_http_perl_refcount() failed");
++    }
++
+     r->request_body_in_single_buf = 1;
+     r->request_body_in_persistent_file = 1;
+     r->request_body_in_clean_file = 1;
+@@ -670,7 +689,7 @@ print(r, ...)
+     if (items == 2) {
+ 
+         /*
+-         * do zero copy for prolate single read-only SV:
++         * do zero copy for prolate single SV:
+          *     $r->print("some text\n");
+          */
+ 
+@@ -680,7 +699,7 @@ print(r, ...)
+             sv = SvRV(sv);
+         }
+ 
+-        if (SvREADONLY(sv) && SvPOK(sv)) {
++        if (SvPOK(sv)) {
+ 
+             p = (u_char *) SvPV(sv, len);
+ 
+@@ -688,6 +707,11 @@ print(r, ...)
+                 XSRETURN_EMPTY;
+             }
+ 
++            if (ngx_http_perl_refcount(aTHX_ r, sv) != NGX_OK) {
++                ctx->error = 1;
++                croak("ngx_http_perl_refcount() failed");
++            }
++
+             b = ngx_calloc_buf(r->pool);
+             if (b == NULL) {
+                 ctx->error = 1;
+@@ -701,7 +725,7 @@ print(r, ...)
+             b->end = b->last;
+ 
+             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+-                           "$r->print: read-only SV: %z", len);
++                           "$r->print: single SV: %z", len);
+ 
+             goto out;
+         }
+@@ -1162,6 +1186,12 @@ sleep(r, sleep, next)
+ 
+     ctx->next = SvRV(next);
+ 
++    if (ngx_http_perl_refcount(aTHX_ r, ctx->next) != NGX_OK) {
++        ctx->error = 1;
++        ctx->next = NULL;
++        croak("ngx_http_perl_refcount() failed");
++    }
++
+     r->connection->write->delayed = 1;
+     ngx_add_timer(r->connection->write, sleep);
+ 
+diff --git a/src/http/modules/perl/ngx_http_perl_module.c b/src/http/modules/perl/ngx_http_perl_module.c
+index f3fc62947..946ddf846 100644
+--- a/src/http/modules/perl/ngx_http_perl_module.c
++++ b/src/http/modules/perl/ngx_http_perl_module.c
+@@ -308,6 +308,29 @@ ngx_http_perl_sleep_handler(ngx_http_request_t *r)
+ }
+ 
+ 
++void
++ngx_http_perl_refcount_cleanup(void *data)
++{
++    ngx_http_perl_cleanup_t  *clnp = data;
++
++    ngx_http_request_t         *r;
++    ngx_http_perl_main_conf_t  *pmcf;
++
++    r = clnp->request;
++    pmcf = ngx_http_get_module_main_conf(r, ngx_http_perl_module);
++
++    {
++
++    dTHXa(pmcf->perl);
++    PERL_SET_CONTEXT(pmcf->perl);
++    PERL_SET_INTERP(pmcf->perl);
++
++    SvREFCNT_dec(clnp->sv);
++
++    }
++}
++
++
+ static ngx_int_t
+ ngx_http_perl_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+     uintptr_t data)
+diff --git a/src/http/modules/perl/ngx_http_perl_module.h b/src/http/modules/perl/ngx_http_perl_module.h
+index 8fa59a4c5..27eea9ada 100644
+--- a/src/http/modules/perl/ngx_http_perl_module.h
++++ b/src/http/modules/perl/ngx_http_perl_module.h
+@@ -50,6 +50,12 @@ typedef struct {
+ } ngx_http_perl_var_t;
+ 
+ 
++typedef struct {
++    ngx_http_request_t       *request;
++    SV                       *sv;
++} ngx_http_perl_cleanup_t;
++
++
+ extern ngx_module_t  ngx_http_perl_module;
+ 
+ 
+@@ -68,6 +74,7 @@ extern void boot_DynaLoader(pTHX_ CV* cv);
+ 
+ void ngx_http_perl_handle_request(ngx_http_request_t *r);
+ void ngx_http_perl_sleep_handler(ngx_http_request_t *r);
++void ngx_http_perl_refcount_cleanup(void *data);
+ 
+ 
+ #endif /* _NGX_HTTP_PERL_MODULE_H_INCLUDED_ */
+-- 
+2.56.0
+
+From 1daee9643a44d41222efe48c9ab33676e0dd36d8 Mon Sep 17 00:00:00 2001
+From: Maxim Dounin <mdounin@mdounin.ru>
+Date: Mon, 6 Jul 2026 07:14:28 +0300
+Subject: [PATCH] Perl: request object validation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Previously, using stale request objects resulted in accesses to already
+freed memory, causing segmentation faults:
+
+    location /stale {
+        perl 'sub {
+            my $r = shift;
+            $prev->log_error(0, "next request arrived") if $prev;
+            $prev = $r;
+            $r->send_http_header;
+            return OK;
+        }';
+    }
+
+Similarly, incorrectly blessed objects might cause segmentation faults,
+such as in the following configuration:
+
+    location /bless {
+        perl 'sub {
+            my $v = 10;
+            my $r = bless \$v, "nginx";
+            $r->send_http_header;
+            return OK;
+        }';
+    }
+
+With this change, active request object is recorded in the
+ngx_http_perl_call_handler() function, and checked by
+ngx_http_perl_set_request() to prevent use of unexpected request
+objects.
+
+Reported by Axel Mierczuk, Keith Hoodlet, 1Password’s Off-by-1 Labs.
+
+Signed-off-by: Sergey Kandaurov <pluknet@nginx.com>
+Origin: https://freenginx.org/hg/nginx/rev/86a2685756ae
+(cherry picked from commit 450dd314c66e4caae0eaff572ae0cd88e5b7acb9)
+---
+ src/http/modules/perl/nginx.xs               | 3 +++
+ src/http/modules/perl/ngx_http_perl_module.c | 7 +++++++
+ src/http/modules/perl/ngx_http_perl_module.h | 3 +++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/src/http/modules/perl/nginx.xs b/src/http/modules/perl/nginx.xs
+index 6acc4f8a0..af8549661 100644
+--- a/src/http/modules/perl/nginx.xs
++++ b/src/http/modules/perl/nginx.xs
+@@ -18,6 +18,9 @@
+ #define ngx_http_perl_set_request(r, ctx)                                     \
+                                                                               \
+     ctx = INT2PTR(ngx_http_perl_ctx_t *, SvIV((SV *) SvRV(ST(0))));           \
++    if (ctx != ngx_http_perl_active_context || ctx == NULL) {                 \
++        croak("invalid request object");                                      \
++    }                                                                         \
+     r = ctx->request
+ 
+ 
+diff --git a/src/http/modules/perl/ngx_http_perl_module.c b/src/http/modules/perl/ngx_http_perl_module.c
+index 946ddf846..300cd5e0a 100644
+--- a/src/http/modules/perl/ngx_http_perl_module.c
++++ b/src/http/modules/perl/ngx_http_perl_module.c
+@@ -148,6 +148,9 @@ static ngx_http_ssi_command_t  ngx_http_perl_ssi_command = {
+ #endif
+ 
+ 
++ngx_http_perl_ctx_t     *ngx_http_perl_active_context;
++
++
+ static ngx_str_t         ngx_null_name = ngx_null_string;
+ static HV               *nginx_stash;
+ 
+@@ -746,6 +749,8 @@ ngx_http_perl_call_handler(pTHX_ ngx_http_request_t *r,
+ 
+     PUSHMARK(sp);
+ 
++    ngx_http_perl_active_context = ctx;
++
+     sv = sv_2mortal(sv_bless(newRV_noinc(newSViv(PTR2IV(ctx))), nginx));
+     XPUSHs(sv);
+ 
+@@ -790,6 +795,8 @@ ngx_http_perl_call_handler(pTHX_ ngx_http_request_t *r,
+     FREETMPS;
+     LEAVE;
+ 
++    ngx_http_perl_active_context = NULL;
++
+     if (ctx->error) {
+ 
+         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
+diff --git a/src/http/modules/perl/ngx_http_perl_module.h b/src/http/modules/perl/ngx_http_perl_module.h
+index 27eea9ada..2747389a9 100644
+--- a/src/http/modules/perl/ngx_http_perl_module.h
++++ b/src/http/modules/perl/ngx_http_perl_module.h
+@@ -59,6 +59,9 @@ typedef struct {
+ extern ngx_module_t  ngx_http_perl_module;
+ 
+ 
++extern ngx_http_perl_ctx_t  *ngx_http_perl_active_context;
++
++
+ /*
+  * workaround for "unused variable `Perl___notused'" warning
+  * when building with perl 5.6.1
+-- 
+2.56.0
+
+From 9af9fe697d86d68431a3943b8f4d791cd2107b52 Mon Sep 17 00:00:00 2001
+From: David Carlier <devnexen@gmail.com>
+Date: Tue, 21 Jul 2026 04:35:57 +0100
+Subject: [PATCH] Perl: fixed $r->print() zero copy with mutable scalars
+
+Since d9b7669666c8, the single-SV zero copy path in $r->print() no
+longer required the SV to be read-only.  Reference counting introduced
+by that change keeps the SV alive, but not its string buffer: modifying
+a mutable scalar after $r->print() overwrites the buffer in place or
+reallocates it, while nginx might still have it queued in r->out, since
+small responses are postponed by ngx_http_write_filter().  This resulted
+in corrupted responses, and in freed memory being sent to the client
+when the scalar was grown.
+
+The SV is now required to be read-only again.  Reference counting is
+still needed here, as a read-only SV in an eval() might be freed with
+the eval's op tree.
+
+(cherry picked from commit a18b3f170ce8796a732ca9f93b969e87e5c5f275)
+---
+ src/http/modules/perl/nginx.xs | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/http/modules/perl/nginx.xs b/src/http/modules/perl/nginx.xs
+index af8549661..efbab280a 100644
+--- a/src/http/modules/perl/nginx.xs
++++ b/src/http/modules/perl/nginx.xs
+@@ -692,7 +692,7 @@ print(r, ...)
+     if (items == 2) {
+ 
+         /*
+-         * do zero copy for prolate single SV:
++         * single read-only SV:
+          *     $r->print("some text\n");
+          */
+ 
+@@ -702,7 +702,7 @@ print(r, ...)
+             sv = SvRV(sv);
+         }
+ 
+-        if (SvPOK(sv)) {
++        if (SvREADONLY(sv) && SvPOK(sv)) {
+ 
+             p = (u_char *) SvPV(sv, len);
+ 
+@@ -728,7 +728,7 @@ print(r, ...)
+             b->end = b->last;
+ 
+             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+-                           "$r->print: single SV: %z", len);
++                           "$r->print: read-only SV: %z", len);
+ 
+             goto out;
+         }
+-- 
+2.56.0
+

@@ -1,0 +1,106 @@
+Patch-Source: https://github.com/nginx/nginx/commit/e62d1582dfa79565734b19e572d5cb4e2abeb6de
+--
+From e84e03653ed11cf6d78f2fe4019b27f77af5bf48 Mon Sep 17 00:00:00 2001
+From: Maxim Dounin <mdounin@mdounin.ru>
+Date: Fri, 11 Sep 2026 08:18:36 -0700
+Subject: [PATCH] Dav: destination validation for COPY and MOVE with "alias".
+
+If COPY or MOVE methods are enabled, the DAV module assumes that it is
+configured for the whole server, and does not try validate that the
+destination URI is within the particular location.  This, however, does
+not work well if it is in fact configured in a non-root location, and
+this location uses the "alias" directive, such as in the following
+configuration:
+
+    location /prefix/ {
+        dav_methods COPY;
+        alias /foo/;
+    }
+
+In particular, if the destination URI is shorter than the aliased
+location prefix, calling ngx_http_map_uri_to_path() with such
+destination URI used to result in segmentation faults (9739e755b).  And
+if the destination URI is longer than the aliased location prefix, but
+does not match it, calling ngx_http_map_uri_to_path() resulted in
+unexpected path values, including ones above the "alias" directory
+specified.
+
+The fix is to check destination URI prefix if "alias" is used, similarly
+to what we do with "try_files".  Additionally, the
+ngx_http_map_uri_to_path() function was updated with additional sanity
+checking to prevent similar issues.
+
+This change is a modified version of a patch by Maxim Dounin.  The
+modifications include skipping the prefix check if the URI was
+rewritten, which preserves the "alias" diagnostics of
+ngx_http_map_uri_to_path().
+
+Signed-off-by: Vadim Zhestikov <v.zhestikov@f5.com>
+Origin: <https://freenginx.org/hg/nginx/rev/aae28b083279>
+(cherry picked from commit e62d1582dfa79565734b19e572d5cb4e2abeb6de)
+---
+ src/http/modules/ngx_http_dav_module.c | 22 +++++++++++++---------
+ src/http/ngx_http_core_module.c        |  6 ++++++
+ 2 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/src/http/modules/ngx_http_dav_module.c b/src/http/modules/ngx_http_dav_module.c
+index 4619b139a..022c7840a 100644
+--- a/src/http/modules/ngx_http_dav_module.c
++++ b/src/http/modules/ngx_http_dav_module.c
+@@ -536,7 +536,7 @@ static ngx_int_t
+ ngx_http_dav_copy_move_handler(ngx_http_request_t *r)
+ {
+     u_char                    *p, *host, *last, ch;
+-    size_t                     len, root;
++    size_t                     len, root, alias;
+     ngx_err_t                  err;
+     ngx_int_t                  rc, depth;
+     ngx_uint_t                 overwrite, slash, dir, flags;
+@@ -646,15 +646,19 @@ destination_done:
+     }
+ 
+     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
++    alias = clcf->alias;
+ 
+-    if (clcf->alias
+-        && clcf->alias != NGX_MAX_SIZE_T_VALUE
+-        && duri.len < clcf->alias)
+-    {
+-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+-                      "client sent invalid \"Destination\" header: \"%V\"",
+-                      &dest->value);
+-        return NGX_HTTP_BAD_REQUEST;
++    if (alias && alias != NGX_MAX_SIZE_T_VALUE && r->valid_location) {
++
++        if (alias > duri.len
++            || ngx_filename_cmp(duri.data, r->uri.data, alias) != 0)
++        {
++            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
++                          "\"Destination\" URI \"%V\" must be "
++                          "within location prefix when using \"alias\"",
++                          &dest->value);
++            return NGX_HTTP_BAD_REQUEST;
++        }
+     }
+ 
+     depth = ngx_http_dav_depth(r, NGX_HTTP_DAV_INFINITY_DEPTH);
+diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
+index 6e49ac5d5..ca0e2ddef 100644
+--- a/src/http/ngx_http_core_module.c
++++ b/src/http/ngx_http_core_module.c
+@@ -1905,6 +1905,12 @@ ngx_http_map_uri_to_path(ngx_http_request_t *r, ngx_str_t *path,
+         return NULL;
+     }
+ 
++    if (alias > r->uri.len && alias != NGX_MAX_SIZE_T_VALUE) {
++        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
++                      "URI shorter than aliased URI part");
++        return NULL;
++    }
++
+     if (clcf->root_lengths == NULL) {
+ 
+         *root_length = clcf->root.len;
+-- 
+2.56.0
+

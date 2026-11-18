@@ -1,0 +1,56 @@
+Patch-Source: https://github.com/nginx/nginx/commit/9cd03532705dc0a9a7ab64b124295a22c1a4756b
+--
+From 81fb83b45dd9037c8380d9360b9938a8e54cec56 Mon Sep 17 00:00:00 2001
+From: Ivan Ovchinnikov <i.ovchinnikov@f5.com>
+Date: Fri, 21 Aug 2026 20:48:15 +0000
+Subject: [PATCH] Event pipe: do not free buffers still used by the downstream
+
+When a body filter returned an error, ngx_event_pipe_drain_chains()
+returned all buffers to p->free_raw_bufs, including those in p->busy,
+which are still owned by the downstream. If upstream EOF was detected
+in the same ngx_event_pipe() pass, ngx_event_pipe_read_upstream() then
+freed them while still referenced. With HTTP/2 only the stream's fake
+connection is marked on error, so ngx_http_v2_send_output_queue() kept
+sending DATA frames pointing at the freed buffers, a use-after-free.
+
+Fixed by keeping the p->busy chains intact, the buffers are freed with
+the request pool.  This also stops the pipe from reusing them for new
+upstream reads, which previously could overwrite response body data
+still queued for the client.  Additionally, the pipe no longer treats
+a downstream it has given up on as merely blocked, so the loop is
+still guaranteed to terminate.
+
+Co-authored-by: Roman Arutyunyan <arut@nginx.com>
+(cherry picked from commit 9cd03532705dc0a9a7ab64b124295a22c1a4756b)
+---
+ src/event/ngx_event_pipe.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/src/event/ngx_event_pipe.c b/src/event/ngx_event_pipe.c
+index d774903ec..7bbca4b24 100644
+--- a/src/event/ngx_event_pipe.c
++++ b/src/event/ngx_event_pipe.c
+@@ -253,6 +253,7 @@ ngx_event_pipe_read_upstream(ngx_event_pipe_t *p)
+                 chain->next = NULL;
+ 
+             } else if (!p->cacheable
++                       && !p->downstream_error
+                        && p->downstream->data == p->output_ctx
+                        && p->downstream->write->ready
+                        && !p->downstream->write->delayed)
+@@ -1111,11 +1112,7 @@ ngx_event_pipe_drain_chains(ngx_event_pipe_t *p)
+     ngx_chain_t  *cl, *tl;
+ 
+     for ( ;; ) {
+-        if (p->busy) {
+-            cl = p->busy;
+-            p->busy = NULL;
+-
+-        } else if (p->out) {
++        if (p->out) {
+             cl = p->out;
+             p->out = NULL;
+ 
+-- 
+2.56.0
+
