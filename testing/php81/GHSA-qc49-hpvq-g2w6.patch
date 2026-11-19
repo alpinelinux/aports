@@ -1,0 +1,328 @@
+From 994024ebaa604971189b0cf4270bad73915a8c66 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Thu, 29 Oct 2026 11:19:04 +0100
+Subject: [PATCH 05/12] Fix GHSA-qc49-hpvq-g2w6: Drain unread request bodies
+
+Opening php://input can create a request body stream without
+consuming the input from the SAPI. Request shutdown treated the
+stream as proof that the body was read and skipped the drain.
+
+Drain whenever post_read is false, independently of whether the
+stream exists. This keeps unread FastCGI STDIN bytes from being
+parsed as another request when FCGI_KEEP_CONN is set.
+
+As a final safeguard, reject a new FastCGI request if the
+previous STDIN record was only partially consumed.
+
+(cherry picked from commit 28014fd092c7acdafb9c074e735f099893a5ef66)
+---
+ main/SAPI.c                                   |   3 +-
+ main/fastcgi.c                                |   6 +
+ sapi/fpm/tests/unread-body-keep-conn.phpt     | 125 +++++++++++++++++
+ .../fpm/tests/unread-body-partial-record.phpt | 127 ++++++++++++++++++
+ 4 files changed, 260 insertions(+), 1 deletion(-)
+ create mode 100644 sapi/fpm/tests/unread-body-keep-conn.phpt
+ create mode 100644 sapi/fpm/tests/unread-body-partial-record.phpt
+
+diff --git a/main/SAPI.c b/main/SAPI.c
+index 57c30e57f71..6979d05dcc7 100644
+--- a/main/SAPI.c
++++ b/main/SAPI.c
+@@ -494,7 +494,8 @@ SAPI_API void sapi_deactivate_module(void)
+ 	zend_llist_destroy(&SG(sapi_headers).headers);
+ 	if (SG(request_info).request_body) {
+ 		SG(request_info).request_body = NULL;
+-	} else if (SG(server_context)) {
++	}
++	if (SG(server_context)) {
+ 		if (!SG(post_read)) {
+ 			/* make sure we've consumed all request input data */
+ 			char dummy[SAPI_POST_BLOCK_SIZE];
+diff --git a/main/fastcgi.c b/main/fastcgi.c
+index 49cb8e1987c..fcd61b4b7a1 100644
+--- a/main/fastcgi.c
++++ b/main/fastcgi.c
+@@ -1046,6 +1046,10 @@ static int fcgi_read_request(fcgi_request *req)
+ 	int len, padding;
+ 	unsigned char buf[FCGI_MAX_LENGTH+8];
+ 
++	if (UNEXPECTED(req->in_len != 0)) {
++		return 0;
++	}
++
+ 	req->keep = 0;
+ 	req->ended = 0;
+ 	req->in_len = 0;
+@@ -1309,6 +1313,8 @@ void fcgi_close(fcgi_request *req, int force, int destroy)
+ 		req->nodelay = 0;
+ #endif
+ 		req->fd = -1;
++		/* a partially read STDIN record does not outlive its connection */
++		req->in_len = 0;
+ 
+ 		req->hook.on_close();
+ 	}
+diff --git a/sapi/fpm/tests/unread-body-keep-conn.phpt b/sapi/fpm/tests/unread-body-keep-conn.phpt
+new file mode 100644
+index 00000000000..5d818c58c7f
+--- /dev/null
++++ b/sapi/fpm/tests/unread-body-keep-conn.phpt
+@@ -0,0 +1,125 @@
++--TEST--
++FPM: unread request body cannot become a new request on a kept connection
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++
++require_once "tester.inc";
++
++function record(int $type, string $content, int $id): string
++{
++    return pack('CCnnCC', 1, $type, $id, strlen($content), 0, 0) . $content;
++}
++
++function params(array $params): string
++{
++    $encoded = '';
++    $encodeLength = static fn(int $length): string => $length < 128
++        ? chr($length)
++        : pack('N', $length | 0x80000000);
++    foreach ($params as $name => $value) {
++        $encoded .= $encodeLength(strlen($name)) . $encodeLength(strlen($value)) . $name . $value;
++    }
++    return $encoded;
++}
++
++function request(int $id, bool $keep, array $params, string $stdin): string
++{
++    return record(1, pack('nCxxxxx', 1, $keep), $id)
++        . record(4, params($params), $id)
++        . record(4, '', $id)
++        . record(5, $stdin, $id)
++        . record(5, '', $id);
++}
++
++function transact(string $address, string $request): string
++{
++    [$host, $port] = explode(':', $address);
++    $socket = fsockopen($host, (int) $port);
++    stream_set_timeout($socket, 3);
++    $written = 0;
++    while ($written < strlen($request)) {
++        $written += fwrite($socket, substr($request, $written));
++    }
++    stream_socket_shutdown($socket, STREAM_SHUT_WR);
++    $response = stream_get_contents($socket);
++    fclose($socket);
++    return $response;
++}
++
++$config = <<<CFG
++[global]
++error_log = {{FILE:LOG}}
++[unconfined]
++listen = {{ADDR}}
++pm = static
++pm.max_children = 1
++catch_workers_output = yes
++CFG;
++
++$code = <<<'PHP'
++<?php
++if ($_SERVER['REMOTE_ADDR'] === '203.0.113.1') {
++    echo "smuggled\n";
++} else {
++    $input = fopen('php://input', 'r');
++    echo "outer\n";
++}
++PHP;
++
++$tester = new FPM\Tester($config, $code);
++$script = $tester->makeSourceFile();
++$tester->start();
++$tester->expectLogStartNotices();
++
++$hiddenParams = [
++    'GATEWAY_INTERFACE' => 'FastCGI/1.0',
++    'REQUEST_METHOD' => 'GET',
++    'SCRIPT_FILENAME' => $script,
++    'SCRIPT_NAME' => '/smuggled.php',
++    'REQUEST_URI' => '/smuggled.php',
++    'SERVER_PROTOCOL' => 'HTTP/1.1',
++    'REMOTE_ADDR' => '203.0.113.1',
++    'CONTENT_LENGTH' => '0',
++];
++$hidden = request(2, false, $hiddenParams, '');
++$body = str_pad("--B\r\nContent-Disposition: form-data\r\n\r\n", 12000, 'A');
++$body = substr_replace($body, $hidden, 5120, strlen($hidden));
++
++$outerParams = [
++    'GATEWAY_INTERFACE' => 'FastCGI/1.0',
++    'REQUEST_METHOD' => 'POST',
++    'SCRIPT_FILENAME' => $script,
++    'SCRIPT_NAME' => '/open.php',
++    'REQUEST_URI' => '/open.php',
++    'SERVER_PROTOCOL' => 'HTTP/1.1',
++    'REMOTE_ADDR' => '127.0.0.1',
++    'CONTENT_TYPE' => 'multipart/form-data; boundary=B',
++    'CONTENT_LENGTH' => (string) strlen($body),
++];
++foreach ([false, true] as $keep) {
++    $response = transact($tester->getAddr(), request(1, $keep, $outerParams, $body));
++    echo 'keep ', $keep ? 'on' : 'off', ': ',
++        str_contains($response, 'smuggled') ? 'smuggled' : 'safe', "\n";
++}
++
++$body = 'A' . $hidden;
++$outerParams['CONTENT_TYPE'] = 'application/octet-stream';
++$outerParams['CONTENT_LENGTH'] = '1';
++$response = transact($tester->getAddr(), request(1, true, $outerParams, $body));
++echo 'partial frame: ',
++    str_contains($response, 'smuggled') ? 'smuggled' : 'safe', "\n";
++
++$tester->terminate();
++$tester->close();
++?>
++--EXPECT--
++keep off: safe
++keep on: safe
++partial frame: safe
++--CLEAN--
++<?php
++require_once "tester.inc";
++FPM\Tester::clean();
++?>
+diff --git a/sapi/fpm/tests/unread-body-partial-record.phpt b/sapi/fpm/tests/unread-body-partial-record.phpt
+new file mode 100644
+index 00000000000..4f3eed4e717
+--- /dev/null
++++ b/sapi/fpm/tests/unread-body-partial-record.phpt
+@@ -0,0 +1,127 @@
++--TEST--
++FPM: partially read STDIN record does not make the worker reject later connections
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++
++require_once "tester.inc";
++
++function record(int $type, string $content, int $id): string
++{
++    return pack('CCnnCC', 1, $type, $id, strlen($content), 0, 0) . $content;
++}
++
++function params(array $params): string
++{
++    $encoded = '';
++    $encodeLength = static fn(int $length): string => $length < 128
++        ? chr($length)
++        : pack('N', $length | 0x80000000);
++    foreach ($params as $name => $value) {
++        $encoded .= $encodeLength(strlen($name)) . $encodeLength(strlen($value)) . $name . $value;
++    }
++    return $encoded;
++}
++
++function request(int $id, bool $keep, array $params, string $stdin): string
++{
++    return record(1, pack('nCxxxxx', 1, $keep), $id)
++        . record(4, params($params), $id)
++        . record(4, '', $id)
++        . record(5, $stdin, $id)
++        . record(5, '', $id);
++}
++
++function transact(string $address, string $request): string
++{
++    [$host, $port] = explode(':', $address);
++    $socket = fsockopen($host, (int) $port);
++    stream_set_timeout($socket, 3);
++    $written = 0;
++    while ($written < strlen($request)) {
++        $written += fwrite($socket, substr($request, $written));
++    }
++    stream_socket_shutdown($socket, STREAM_SHUT_WR);
++    $response = stream_get_contents($socket);
++    fclose($socket);
++    return $response;
++}
++
++$config = <<<CFG
++[global]
++error_log = {{FILE:LOG}}
++[unconfined]
++listen = {{ADDR}}
++pm = static
++pm.max_children = 1
++catch_workers_output = yes
++CFG;
++
++$code = <<<'PHP'
++<?php
++if ($_SERVER['REMOTE_ADDR'] === '203.0.113.1') {
++    echo "smuggled\n";
++} else {
++    echo "outer ", strlen(file_get_contents('php://input')), "\n";
++}
++PHP;
++
++$tester = new FPM\Tester($config, $code);
++$script = $tester->makeSourceFile();
++$tester->start();
++$tester->expectLogStartNotices();
++
++$hiddenParams = [
++    'GATEWAY_INTERFACE' => 'FastCGI/1.0',
++    'REQUEST_METHOD' => 'GET',
++    'SCRIPT_FILENAME' => $script,
++    'SCRIPT_NAME' => '/smuggled.php',
++    'REQUEST_URI' => '/smuggled.php',
++    'SERVER_PROTOCOL' => 'HTTP/1.1',
++    'REMOTE_ADDR' => '203.0.113.1',
++    'CONTENT_LENGTH' => '0',
++];
++$hidden = request(2, false, $hiddenParams, '');
++$outerParams = [
++    'GATEWAY_INTERFACE' => 'FastCGI/1.0',
++    'REQUEST_METHOD' => 'POST',
++    'SCRIPT_FILENAME' => $script,
++    'SCRIPT_NAME' => '/open.php',
++    'REQUEST_URI' => '/open.php',
++    'SERVER_PROTOCOL' => 'HTTP/1.1',
++    'REMOTE_ADDR' => '127.0.0.1',
++    'CONTENT_TYPE' => 'application/octet-stream',
++    'CONTENT_LENGTH' => '1',
++];
++$plainParams = ['REQUEST_METHOD' => 'GET', 'CONTENT_LENGTH' => '0'] + $outerParams;
++unset($plainParams['CONTENT_TYPE']);
++
++/* The STDIN record is longer than CONTENT_LENGTH so it is left partially read. */
++foreach ([false, true] as $keep) {
++    $response = transact($tester->getAddr(), request(1, $keep, $outerParams, 'A' . $hidden));
++    echo 'keep ', $keep ? 'on' : 'off', ': ',
++        str_contains($response, 'smuggled') ? 'smuggled' : 'safe', ', ',
++        str_contains($response, 'outer 1') ? 'served' : 'not served', "\n";
++    /* The only worker must still serve new connections. */
++    foreach ([1, 2] as $n) {
++        $response = transact($tester->getAddr(), request(1, false, $plainParams, ''));
++        echo "  next connection $n: ", str_contains($response, 'outer 0') ? 'served' : 'not served', "\n";
++    }
++}
++
++$tester->terminate();
++$tester->close();
++?>
++--EXPECT--
++keep off: safe, served
++  next connection 1: served
++  next connection 2: served
++keep on: safe, served
++  next connection 1: served
++  next connection 2: served
++--CLEAN--
++<?php
++require_once "tester.inc";
++FPM\Tester::clean();
++?>

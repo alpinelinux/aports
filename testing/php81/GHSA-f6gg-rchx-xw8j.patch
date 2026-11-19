@@ -1,0 +1,152 @@
+From b30334e493b83db4931c8849b5bebdf7162ad9ae Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Fri, 6 Nov 2026 21:46:18 +0100
+Subject: [PATCH 10/12] Fix GHSA-f6gg-rchx-xw8j: mixed case HTTPS and FTPS
+
+Determine TLS use from a case-insensitive comparison of the complete
+URL scheme, preventing mixed-case HTTPS and FTPS URLs from downgrading
+to plaintext. Add regression tests for both wrappers.
+
+(cherry picked from commit cb68a63e8177f9dc25aba23c0d79c7da82ea69db)
+---
+ ext/standard/ftp_fopen_wrapper.c              |  2 +-
+ ext/standard/http_fopen_wrapper.c             |  2 +-
+ .../tests/http/ghsa-f6gg-rchx-xw8j.phpt       | 61 +++++++++++++++++++
+ .../tests/streams/ghsa-f6gg-rchx-xw8j.phpt    | 34 +++++++++++
+ 4 files changed, 97 insertions(+), 2 deletions(-)
+ create mode 100644 ext/standard/tests/http/ghsa-f6gg-rchx-xw8j.phpt
+ create mode 100644 ext/standard/tests/streams/ghsa-f6gg-rchx-xw8j.phpt
+
+diff --git a/ext/standard/ftp_fopen_wrapper.c b/ext/standard/ftp_fopen_wrapper.c
+index c7491179fa9..055a67ac48f 100644
+--- a/ext/standard/ftp_fopen_wrapper.c
++++ b/ext/standard/ftp_fopen_wrapper.c
+@@ -141,7 +141,7 @@ static php_stream *php_ftp_fopen_connect(php_stream_wrapper *wrapper, const char
+ 		return NULL;
+ 	}
+ 
+-	use_ssl = resource->scheme && (ZSTR_LEN(resource->scheme) > 3) && ZSTR_VAL(resource->scheme)[3] == 's';
++	use_ssl = resource->scheme && zend_string_equals_literal_ci(resource->scheme, "ftps");
+ 
+ 	/* use port 21 if one wasn't specified */
+ 	if (resource->port == 0)
+diff --git a/ext/standard/http_fopen_wrapper.c b/ext/standard/http_fopen_wrapper.c
+index f2b15f7206e..b5b3cb17bd8 100644
+--- a/ext/standard/http_fopen_wrapper.c
++++ b/ext/standard/http_fopen_wrapper.c
+@@ -428,7 +428,7 @@ static php_stream *php_stream_url_wrap_http_ex(php_stream_wrapper *wrapper,
+ 			request_fulluri = zend_is_true(tmpzval);
+ 		}
+ 
+-		use_ssl = resource->scheme && (ZSTR_LEN(resource->scheme) > 4) && ZSTR_VAL(resource->scheme)[4] == 's';
++		use_ssl = zend_string_equals_literal_ci(resource->scheme, "https");
+ 		/* choose default ports */
+ 		if (use_ssl && resource->port == 0)
+ 			resource->port = 443;
+diff --git a/ext/standard/tests/http/ghsa-f6gg-rchx-xw8j.phpt b/ext/standard/tests/http/ghsa-f6gg-rchx-xw8j.phpt
+new file mode 100644
+index 00000000000..11bfa680a92
+--- /dev/null
++++ b/ext/standard/tests/http/ghsa-f6gg-rchx-xw8j.phpt
+@@ -0,0 +1,61 @@
++--TEST--
++GHSA-f6gg-rchx-xw8j: mixed-case HTTPS URLs must use TLS
++--EXTENSIONS--
++openssl
++--SKIPIF--
++<?php
++if (!function_exists('proc_open')) die('skip proc_open() not available');
++?>
++--FILE--
++<?php
++$serverCode = <<<'CODE'
++    $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
++    phpt_notify_server_start($server);
++
++    $conn = stream_socket_accept($server);
++    $request = fread($conn, 1);
++
++    if ($request === "\x16") {
++        $result = 'TLS';
++    } else {
++        while (($line = stream_get_line($conn, 8192, "\r\n")) !== false) {
++            $request .= $line . "\r\n";
++            if ($line === '') {
++                break;
++            }
++        }
++        $request .= stream_get_contents($conn, strlen('opensec-sensitive-body'));
++        $result = str_contains($request, 'Authorization: Basic ')
++            && str_contains($request, 'X-Opensec-Request: validation')
++            && str_contains($request, 'opensec-sensitive-body')
++                ? 'plaintext credentials and body'
++                : 'unexpected plaintext request';
++    }
++
++    fclose($conn);
++    fclose($server);
++    phpt_notify(message: $result);
++CODE;
++
++$clientCode = <<<'CODE'
++    $context = stream_context_create([
++        'http' => [
++            'method' => 'POST',
++            'content' => 'opensec-sensitive-body',
++            'header' => "X-Opensec-Request: validation\r\n",
++        ],
++        'ssl' => [
++            'verify_peer' => false,
++            'verify_peer_name' => false,
++        ],
++    ]);
++    var_dump(@file_get_contents('HTTPS://alice:secret@{{ ADDR }}/secret', false, $context));
++    echo phpt_wait();
++CODE;
++
++include sprintf('%s/../../../openssl/tests/ServerClientTestCase.inc', __DIR__);
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--EXPECT--
++bool(false)
++TLS
+diff --git a/ext/standard/tests/streams/ghsa-f6gg-rchx-xw8j.phpt b/ext/standard/tests/streams/ghsa-f6gg-rchx-xw8j.phpt
+new file mode 100644
+index 00000000000..8c7001508c9
+--- /dev/null
++++ b/ext/standard/tests/streams/ghsa-f6gg-rchx-xw8j.phpt
+@@ -0,0 +1,34 @@
++--TEST--
++GHSA-f6gg-rchx-xw8j: mixed-case FTPS URLs must enable TLS
++--EXTENSIONS--
++openssl
++--SKIPIF--
++<?php
++if (!function_exists('proc_open')) die('skip proc_open() not available');
++?>
++--FILE--
++<?php
++$serverCode = <<<'CODE'
++    $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
++    phpt_notify_server_start($server);
++
++    $conn = stream_socket_accept($server);
++    fwrite($conn, "220 Ready\r\n");
++    $command = stream_get_line($conn, 8192, "\r\n");
++
++    fclose($conn);
++    fclose($server);
++    phpt_notify(message: $command);
++CODE;
++
++$clientCode = <<<'CODE'
++    var_dump(@fopen('FTPS://{{ ADDR }}/secret', 'r'));
++    echo phpt_wait();
++CODE;
++
++include sprintf('%s/../../../openssl/tests/ServerClientTestCase.inc', __DIR__);
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--EXPECT--
++bool(false)
++AUTH TLS

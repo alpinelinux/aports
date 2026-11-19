@@ -1,0 +1,113 @@
+From 9ac9dee7a8db227aa654cdf3655398034cadddf3 Mon Sep 17 00:00:00 2001
+From: Ilija Tovilo <ilija.tovilo@me.com>
+Date: Sun, 15 Nov 2026 15:25:20 +0100
+Subject: [PATCH 07/12] Fix GHSA-gr4f-wgx5-jpfv: DATEG(tzcache) use-after-free
+
+(cherry picked from commit f986c5ca37c0fdc50595d8291a9920a1df23bf38)
+
+PHP 8.1 adaptation:
+- ext/zend_test/php_test.h: 8.1 lacks print_stderr_mshutdown and
+  limit_copy_file_range, so warn_on_startup is added after register_passes.
+- ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt: 8.1 has no "PHP Request Startup"
+  error prefix (09237f61265 is 8.2+), so the input-vars warning is reported
+  as "Unknown:" like the other 8.1 max_input_vars tests.
+The main/main.c fix is unchanged.
+---
+ ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt | 22 ++++++++++++++++++++++
+ ext/zend_test/php_test.h                |  1 +
+ ext/zend_test/test.c                    | 12 ++++++++++++
+ main/main.c                             | 10 +---------
+ 4 files changed, 36 insertions(+), 9 deletions(-)
+ create mode 100644 ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt
+
+diff --git a/ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt b/ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt
+new file mode 100644
+index 00000000000..c76d9bf74bd
+--- /dev/null
++++ b/ext/date/tests/GHSA-gr4f-wgx5-jpfv.phpt
+@@ -0,0 +1,22 @@
++--TEST--
++GHSA-gr4f-wgx5-jpfv: DATEG(tzcache) use-after-free
++--CREDITS--
++Sebastian Bergmann
++--CGI--
++--ENV--
++QUERY_STRING=a=1&b=2
++--EXTENSIONS--
++session
++zend_test
++--INI--
++error_log="{TMP}/GHSA-gr4f-wgx5-jpfv.log"
++log_errors=1
++max_input_vars=1
++zend_test.warn_on_startup=1
++--FILE--
++<?php
++echo "Hello world\n";
++?>
++--EXPECTF--
++Warning: Unknown: Input variables exceeded 1. To increase the limit change max_input_vars in php.ini. in Unknown on line 0
++Hello world%r(?:\n\nWarning: Test startup warning from zend_test in Unknown on line 0)?%r
+diff --git a/ext/zend_test/php_test.h b/ext/zend_test/php_test.h
+index 9d0ca087ce6..e902948c2d7 100644
+--- a/ext/zend_test/php_test.h
++++ b/ext/zend_test/php_test.h
+@@ -52,6 +52,7 @@ ZEND_BEGIN_MODULE_GLOBALS(zend_test)
+ 	HashTable global_weakmap;
+ 	int replace_zend_execute_ex;
+ 	int register_passes;
++	bool warn_on_startup;
+ 	int observe_opline_in_zendmm;
+ 	zend_mm_heap* zend_orig_heap;
+ 	zend_mm_heap* zend_test_heap;
+diff --git a/ext/zend_test/test.c b/ext/zend_test/test.c
+index 40875304ad0..f9375595a04 100644
+--- a/ext/zend_test/test.c
++++ b/ext/zend_test/test.c
+@@ -456,6 +456,17 @@ static PHP_INI_MH(OnUpdateZendTestObserveOplineInZendMM)
+ 	return OnUpdateBool(entry, new_value, mh_arg1, mh_arg2, mh_arg3, stage);
+ }
+ 
++static PHP_INI_MH(OnUpdateZendTestWarnOnStartup)
++{
++	zend_result result = OnUpdateBool(entry, new_value, mh_arg1, mh_arg2, mh_arg3, stage);
++	if (result == SUCCESS) {
++		if (*(bool *)ZEND_INI_GET_ADDR()) {
++			zend_error(E_WARNING, "Test startup warning from zend_test");
++		}
++	}
++	return result;
++}
++
+ static ZEND_FUNCTION(zend_test_is_pcre_bundled)
+ {
+ 	ZEND_PARSE_PARAMETERS_NONE();
+@@ -651,6 +662,7 @@ PHP_INI_BEGIN()
+ 	STD_PHP_INI_BOOLEAN("zend_test.replace_zend_execute_ex", "0", PHP_INI_SYSTEM, OnUpdateBool, replace_zend_execute_ex, zend_zend_test_globals, zend_test_globals)
+ 	STD_PHP_INI_BOOLEAN("zend_test.register_passes", "0", PHP_INI_SYSTEM, OnUpdateBool, register_passes, zend_zend_test_globals, zend_test_globals)
+ 	STD_PHP_INI_BOOLEAN("zend_test.observe_opline_in_zendmm", "0", PHP_INI_ALL, OnUpdateZendTestObserveOplineInZendMM, observe_opline_in_zendmm, zend_zend_test_globals, zend_test_globals)
++	STD_PHP_INI_BOOLEAN("zend_test.warn_on_startup", "0", PHP_INI_SYSTEM, OnUpdateZendTestWarnOnStartup, warn_on_startup, zend_zend_test_globals, zend_test_globals)
+ PHP_INI_END()
+ 
+ void (*old_zend_execute_ex)(zend_execute_data *execute_data);
+diff --git a/main/main.c b/main/main.c
+index b9994ccf9d2..1b4b963f463 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -822,15 +822,7 @@ PHPAPI ZEND_COLD void php_log_err_with_severity(const char *log_message, int sys
+ 			zend_string *error_time_str;
+ 
+ 			time(&error_time);
+-#ifdef ZTS
+-			if (!php_during_module_startup()) {
+-				error_time_str = php_format_date("d-M-Y H:i:s e", 13, error_time, 1);
+-			} else {
+-				error_time_str = php_format_date("d-M-Y H:i:s e", 13, error_time, 0);
+-			}
+-#else
+-			error_time_str = php_format_date("d-M-Y H:i:s e", 13, error_time, 1);
+-#endif
++			error_time_str = php_format_date("d-M-Y H:i:s e", 13, error_time, PG(modules_activated) && EG(active));
+ 			len = spprintf(&tmp, 0, "[%s] %s%s", ZSTR_VAL(error_time_str), log_message, PHP_EOL);
+ #ifdef PHP_WIN32
+ 			php_flock(fd, LOCK_EX);

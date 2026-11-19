@@ -1,0 +1,239 @@
+From 4909ae2680e63e69144933ccbdeb847c03db95f3 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Mon, 26 Oct 2026 20:10:08 +0100
+Subject: [PATCH 04/12] Fix GHSA-3mg3-cr28-46gc: FPM XSS within status endpoint
+ via user and script
+
+The fix for GHSA-7qg2-v9fj-4mwv escaped only the request URI and query
+string. The request method, auth user and script filename were still
+printed raw in the full status output. Escape all of them using a common
+helper.
+
+(cherry picked from commit 1ecb92f2cdeb235bb10d6c220c9be4a13f527243)
+---
+ sapi/fpm/fpm/fpm_status.c                     | 98 +++++++++----------
+ .../tests/ghsa-3mg3-cr28-46gc-status-xss.phpt | 70 +++++++++++++
+ 2 files changed, 117 insertions(+), 51 deletions(-)
+ create mode 100644 sapi/fpm/tests/ghsa-3mg3-cr28-46gc-status-xss.phpt
+
+diff --git a/sapi/fpm/fpm/fpm_status.c b/sapi/fpm/fpm/fpm_status.c
+index 81292aa3bf8..daf07c33a4c 100644
+--- a/sapi/fpm/fpm/fpm_status.c
++++ b/sapi/fpm/fpm/fpm_status.c
+@@ -45,6 +45,32 @@ int fpm_status_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
+ }
+ /* }}} */
+ 
++static char *fpm_status_escape(const char *str, bool encode_html, bool encode_json, zend_string **tmp)
++{
++	char *escaped;
++
++	*tmp = NULL;
++	if (str[0] == '\0') {
++		return NULL;
++	}
++	if (encode_html) {
++		*tmp = php_escape_html_entities_ex((const unsigned char *) str, strlen(str), 1,
++				ENT_DISALLOWED | ENT_HTML_DOC_XML1 | ENT_COMPAT, NULL, /* double_encode */ 1, /* quiet */ 0);
++		return ZSTR_VAL(*tmp);
++	}
++	if (encode_json) {
++		*tmp = php_json_encode_string(str, strlen(str), PHP_JSON_INVALID_UTF8_IGNORE);
++		escaped = ZSTR_VAL(*tmp);
++		/* remove quotes around the string */
++		if (ZSTR_LEN(*tmp) >= 2) {
++			escaped[ZSTR_LEN(*tmp) - 1] = '\0';
++			++escaped;
++		}
++		return escaped;
++	}
++	return (char *) str;
++}
++
+ int fpm_status_export_to_zval(zval *status)
+ {
+ 	struct fpm_scoreboard_s scoreboard, *scoreboard_p;
+@@ -525,8 +551,10 @@ int fpm_status_handle_request(void) /* {{{ */
+ 		if (full_syntax) {
+ 			unsigned int i;
+ 			int first;
+-			zend_string *tmp_query_string, *tmp_request_uri_string;
+-			char *query_string, *request_uri_string;
++			zend_string *tmp_request_method_string, *tmp_request_uri_string, *tmp_query_string;
++			zend_string *tmp_auth_user_string, *tmp_script_filename_string;
++			char *request_method_string, *request_uri_string, *query_string;
++			char *auth_user_string, *script_filename_string;
+ 			struct timeval duration, now;
+ 			float cpu;
+ 
+@@ -551,52 +579,11 @@ int fpm_status_handle_request(void) /* {{{ */
+ 					}
+ 				}
+ 
+-				request_uri_string = NULL;
+-				tmp_request_uri_string = NULL;
+-				if (proc->request_uri[0] != '\0') {
+-					if (encode_html) {
+-						tmp_request_uri_string = php_escape_html_entities_ex(
+-								(const unsigned char *) proc->request_uri,
+-								strlen(proc->request_uri), 1, ENT_DISALLOWED | ENT_HTML_DOC_XML1 | ENT_COMPAT,
+-								NULL, /* double_encode */ 1, /* quiet */ 0);
+-						request_uri_string = ZSTR_VAL(tmp_request_uri_string);
+-					} else if (encode_json) {
+-						tmp_request_uri_string = php_json_encode_string(proc->request_uri,
+-								strlen(proc->request_uri), PHP_JSON_INVALID_UTF8_IGNORE);
+-						request_uri_string = ZSTR_VAL(tmp_request_uri_string);
+-						/* remove quotes around the string */
+-						if (ZSTR_LEN(tmp_request_uri_string) >= 2) {
+-							request_uri_string[ZSTR_LEN(tmp_request_uri_string) - 1] = '\0';
+-							++request_uri_string;
+-						}
+-					} else {
+-						request_uri_string = proc->request_uri;
+-					}
+-				}
+-
+-				query_string = NULL;
+-				tmp_query_string = NULL;
+-				if (proc->query_string[0] != '\0') {
+-					if (encode_html) {
+-						tmp_query_string = php_escape_html_entities_ex(
+-								(const unsigned char *) proc->query_string,
+-								strlen(proc->query_string), 1, ENT_DISALLOWED | ENT_HTML_DOC_XML1 | ENT_COMPAT,
+-								NULL, /* double_encode */ 1, /* quiet */ 0);
+-					} else if (encode_json) {
+-						tmp_query_string = php_json_encode_string(proc->query_string,
+-								strlen(proc->query_string), PHP_JSON_INVALID_UTF8_IGNORE);
+-					} else {
+-						query_string = proc->query_string;
+-					}
+-					if (tmp_query_string) {
+-						query_string = ZSTR_VAL(tmp_query_string);
+-						/* remove quotes around the string */
+-						if (encode_json && ZSTR_LEN(tmp_query_string) >= 2) {
+-							query_string[ZSTR_LEN(tmp_query_string) - 1] = '\0';
+-							++query_string;
+-						}
+-					}
+-				}
++				request_method_string = fpm_status_escape(proc->request_method, encode_html, encode_json, &tmp_request_method_string);
++				request_uri_string = fpm_status_escape(proc->request_uri, encode_html, encode_json, &tmp_request_uri_string);
++				query_string = fpm_status_escape(proc->query_string, encode_html, encode_json, &tmp_query_string);
++				auth_user_string = fpm_status_escape(proc->auth_user, encode_html, encode_json, &tmp_auth_user_string);
++				script_filename_string = fpm_status_escape(proc->script_filename, encode_html, encode_json, &tmp_script_filename_string);
+ 
+ 				/* prevent NaN */
+ 				if (proc->cpu_duration.tv_sec == 0 && proc->cpu_duration.tv_usec == 0) {
+@@ -618,24 +605,33 @@ int fpm_status_handle_request(void) /* {{{ */
+ 					(unsigned long) (now_epoch - proc->start_epoch),
+ 					proc->requests,
+ 					duration.tv_sec * 1000000UL + duration.tv_usec,
+-					proc->request_method[0] != '\0' ? proc->request_method : "-",
++					request_method_string ? request_method_string : "-",
+ 					request_uri_string ? request_uri_string : "-",
+ 					query_string ? "?" : "",
+ 					query_string ? query_string : "",
+ 					proc->content_length,
+-					proc->auth_user[0] != '\0' ? proc->auth_user : "-",
+-					proc->script_filename[0] != '\0' ? proc->script_filename : "-",
++					auth_user_string ? auth_user_string : "-",
++					script_filename_string ? script_filename_string : "-",
+ 					proc->request_stage == FPM_REQUEST_ACCEPTING ? cpu : 0.,
+ 					proc->request_stage == FPM_REQUEST_ACCEPTING ? proc->memory : 0);
+ 				PUTS(buffer);
+ 				efree(buffer);
+ 
++				if (tmp_request_method_string) {
++					zend_string_free(tmp_request_method_string);
++				}
+ 				if (tmp_request_uri_string) {
+ 					zend_string_free(tmp_request_uri_string);
+ 				}
+ 				if (tmp_query_string) {
+ 					zend_string_free(tmp_query_string);
+ 				}
++				if (tmp_auth_user_string) {
++					zend_string_free(tmp_auth_user_string);
++				}
++				if (tmp_script_filename_string) {
++					zend_string_free(tmp_script_filename_string);
++				}
+ 			}
+ 
+ 			if (full_post) {
+diff --git a/sapi/fpm/tests/ghsa-3mg3-cr28-46gc-status-xss.phpt b/sapi/fpm/tests/ghsa-3mg3-cr28-46gc-status-xss.phpt
+new file mode 100644
+index 00000000000..0a40a5ad4b0
+--- /dev/null
++++ b/sapi/fpm/tests/ghsa-3mg3-cr28-46gc-status-xss.phpt
+@@ -0,0 +1,70 @@
++--TEST--
++FPM: GHSA-3mg3-cr28-46gc - status xss via request method, auth user and script filename
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++
++require_once "tester.inc";
++
++$cfg = <<<EOT
++[global]
++error_log = {{FILE:LOG}}
++[unconfined]
++listen = {{ADDR}}
++pm = static
++pm.max_children = 3
++pm.status_path = /status
++catch_workers_output = yes
++EOT;
++
++$code = <<<EOT
++<?php
++usleep(300000);
++EOT;
++
++$scriptFilename = __DIR__ . '/ghsa-3mg3-cr28-46gc-<svg>.php';
++file_put_contents($scriptFilename, $code);
++
++$tester = new FPM\Tester($cfg, $code);
++$tester->start();
++$tester->expectLogStartNotices();
++$responses = $tester
++        ->multiRequest([
++                [
++                    'uri' => '/ghsa-3mg3-cr28-46gc-<svg>.php',
++                    'headers' => [
++                        'REQUEST_METHOD' => '<svg>',
++                        'HTTP_AUTHORIZATION' => 'Basic ' . base64_encode('"<svg onload=x>:x'),
++                        'SCRIPT_FILENAME' => $scriptFilename,
++                    ],
++                ],
++                ['uri' => '/status', 'query' => 'full&html', 'delay' => 100000],
++                ['uri' => '/status', 'query' => 'full&json', 'delay' => 100000],
++        ]);
++var_dump(strpos($responses[1]->getBody(), '<svg'));
++var_dump(substr_count($responses[1]->getBody(), '&lt;svg'));
++$status = json_decode($responses[2]->getBody('application/json'), true);
++foreach ($status['processes'] as $proc) {
++    if ($proc['request method'] === '<svg>') {
++        var_dump($proc['user'], $proc['script'] === $scriptFilename);
++    }
++}
++$tester->terminate();
++$tester->expectLogTerminatingNotices();
++$tester->close();
++
++?>
++Done
++--EXPECT--
++bool(false)
++int(4)
++string(15) ""<svg onload=x>"
++bool(true)
++Done
++--CLEAN--
++<?php
++require_once "tester.inc";
++FPM\Tester::clean();
++@unlink(__DIR__ . '/ghsa-3mg3-cr28-46gc-<svg>.php');
++?>

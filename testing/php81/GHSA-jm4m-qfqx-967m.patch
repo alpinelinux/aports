@@ -1,0 +1,107 @@
+From 44ec6a8de5ca501f357c7df51e0d1062b2837961 Mon Sep 17 00:00:00 2001
+From: "Ian P. Christian" <ian.christian@zoopla.co.uk>
+Date: Tue, 27 Oct 2026 17:59:48 +0100
+Subject: [PATCH 12/12] Fix GHSA-jm4m-qfqx-967m: FPM worker stdio pipe fd
+ closed twice
+
+Backport of the GH-24046 fix (cd161267c0d2ca293b6959114d7c68867273bbda).
+
+Co-authored-by: ndossche <7771979+ndossche@users.noreply.github.com>
+(cherry picked from commit 8c38b791449708540fd356ddc6927f463faeca91)
+---
+ sapi/fpm/fpm/fpm_children.c                   |  8 +++
+ .../gh24046-stdio-pipe-double-close.phpt      | 57 +++++++++++++++++++
+ 2 files changed, 65 insertions(+)
+ create mode 100644 sapi/fpm/tests/gh24046-stdio-pipe-double-close.phpt
+
+diff --git a/sapi/fpm/fpm/fpm_children.c b/sapi/fpm/fpm/fpm_children.c
+index 1c9780e3de3..13bdd0a1d21 100644
+--- a/sapi/fpm/fpm/fpm_children.c
++++ b/sapi/fpm/fpm/fpm_children.c
+@@ -87,7 +87,11 @@ static void fpm_child_close(struct fpm_child_s *child, int in_event_loop) /* {{{
+ 			fpm_event_fire(&child->ev_stdout);
+ 		}
+ 		if (child->fd_stdout != -1) {
++			if (in_event_loop) {
++				fpm_event_del(&child->ev_stdout);
++			}
+ 			close(child->fd_stdout);
++			child->fd_stdout = -1;
+ 		}
+ 	}
+ 
+@@ -97,7 +101,11 @@ static void fpm_child_close(struct fpm_child_s *child, int in_event_loop) /* {{{
+ 			fpm_event_fire(&child->ev_stderr);
+ 		}
+ 		if (child->fd_stderr != -1) {
++			if (in_event_loop) {
++				fpm_event_del(&child->ev_stderr);
++			}
+ 			close(child->fd_stderr);
++			child->fd_stderr = -1;
+ 		}
+ 	}
+ 
+diff --git a/sapi/fpm/tests/gh24046-stdio-pipe-double-close.phpt b/sapi/fpm/tests/gh24046-stdio-pipe-double-close.phpt
+new file mode 100644
+index 00000000000..af0c8bd0c6d
+--- /dev/null
++++ b/sapi/fpm/tests/gh24046-stdio-pipe-double-close.phpt
+@@ -0,0 +1,57 @@
++--TEST--
++GH-24046 (FPM: worker stdio pipe fd closed twice when a child process outlives the worker)
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++
++require_once "tester.inc";
++
++$cfg = <<<EOT
++[global]
++error_log = {{FILE:LOG}}
++[unconfined]
++listen = {{ADDR}}
++pm = static
++pm.max_children = 1
++pm.max_requests = 1
++catch_workers_output = yes
++decorate_workers_output = no
++EOT;
++
++$code = <<<'EOT'
++<?php
++/* dup() of the worker's stderr pipe that is inherited by the background process */
++$stderr = fopen('php://stderr', 'a');
++if (@fwrite($stderr, "log line\n") === false) {
++    echo "write to stderr failed";
++    exit;
++}
++if (isset($_GET['bg'])) {
++    exec('sleep 3 > /dev/null 2>&1 &');
++}
++echo "ok";
++EOT;
++
++$tester = new FPM\Tester($cfg, $code);
++$tester->start();
++$tester->expectLogStartNotices();
++/* The worker exits after this request while the background process still holds
++ * its stderr pipe open. The replacement worker gets the same pipe fd numbers. */
++$tester->request('bg=1')->expectBody('ok');
++/* Wait for the postponed free of the exited worker. */
++usleep(1500000);
++$tester->request()->expectBody('ok');
++$tester->terminate();
++$tester->expectNoLogPattern('/unable to (remove|read)/');
++$tester->close();
++
++?>
++Done
++--EXPECT--
++Done
++--CLEAN--
++<?php
++require_once "tester.inc";
++FPM\Tester::clean();
++?>

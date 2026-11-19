@@ -1,0 +1,178 @@
+From b5e14d2fae4c01960c4b9d91ae2b17e95b82ac50 Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Tue, 6 Oct 2026 15:29:19 +0200
+Subject: [PATCH 11/12] Fix GHSA-mmf9-xm3v-hg2x: quadratic folded header
+ concatenation
+
+Each folded response header line was concatenated with the whole
+accumulated header value into a newly allocated string. That made
+parsing of a header split into many continuation lines quadratic, so a
+malicious server could stall the client for a long time with a few MB
+of headers.
+
+Accumulate the last header line in a smart_str instead so folding is
+linear in the total header size.
+
+(cherry picked from commit a303f697268d42f6671c9d4c479ff90bbf301db1)
+---
+ ext/standard/http_fopen_wrapper.c | 59 +++++++++++++++----------------
+ 1 file changed, 28 insertions(+), 31 deletions(-)
+
+diff --git a/ext/standard/http_fopen_wrapper.c b/ext/standard/http_fopen_wrapper.c
+index b5b3cb17bd8..4691cef1510 100644
+--- a/ext/standard/http_fopen_wrapper.c
++++ b/ext/standard/http_fopen_wrapper.c
+@@ -206,25 +206,21 @@ static bool php_stream_http_response_header_trim(char *http_header_line,
+ }
+ 
+ /* Process folding headers of the current line and if there are none, parse last full response
+- * header line. It returns NULL if the last header is finished, otherwise it returns updated
+- * last header line.  */
+-static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *wrapper,
++ * header line. It returns true if the current line was folded into the last header line,
++ * otherwise false.  */
++static bool php_stream_http_response_headers_parse(php_stream_wrapper *wrapper,
+ 		php_stream *stream, php_stream_context *context, int options,
+-		zend_string *last_header_line_str, char *header_line, size_t *header_line_length,
++		smart_str *last_header, char *header_line, size_t *header_line_length,
+ 		int response_code, zval *response_header,
+ 		php_stream_http_response_header_info *header_info)
+ {
+-	char *last_header_line = ZSTR_VAL(last_header_line_str);
+-	size_t last_header_line_length = ZSTR_LEN(last_header_line_str);
+-	char *last_header_line_end = ZSTR_VAL(last_header_line_str) + ZSTR_LEN(last_header_line_str) - 1;
+-
+ 	/* Process non empty header line. */
+ 	if (header_line && (*header_line != '\n' && *header_line != '\r')) {
+ 		/* Removing trailing white spaces. */
+ 		if (php_stream_http_response_header_trim(header_line, header_line_length) &&
+ 				*header_line_length == 0) {
+ 			/* Only spaces so treat as an empty folding header. */
+-			return last_header_line_str;
++			return true;
+ 		}
+ 
+ 		/* Process folding headers if starting with a space or a tab. */
+@@ -239,18 +235,18 @@ static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *w
+ 			/* It has to have some characters because it would get returned after the call
+ 			 * php_stream_http_response_header_trim above. */
+ 			ZEND_ASSERT(http_folded_header_line_length > 0);
+-			/* Concatenate last header line, space and current header line. */
+-			zend_string *extended_header_str = zend_string_concat3(
+-					last_header_line, last_header_line_length,
+-					" ", 1,
+-					http_folded_header_line, http_folded_header_line_length);
+-			zend_string_efree(last_header_line_str);
+-			last_header_line_str = extended_header_str;
+-			/* Return new header line. */
+-			return last_header_line_str;
++			/* Append space and current header line to the last header line. */
++			smart_str_appendc(last_header, ' ');
++			smart_str_appendl(last_header, http_folded_header_line, http_folded_header_line_length);
++			return true;
+ 		}
+ 	}
+ 
++	zend_string *last_header_line_str = smart_str_extract(last_header);
++	char *last_header_line = ZSTR_VAL(last_header_line_str);
++	size_t last_header_line_length = ZSTR_LEN(last_header_line_str);
++	char *last_header_line_end = ZSTR_VAL(last_header_line_str) + ZSTR_LEN(last_header_line_str) - 1;
++
+ 	/* Find header separator position. */
+ 	char *last_header_value = memchr(last_header_line, ':', last_header_line_length);
+ 	if (last_header_value) {
+@@ -262,7 +258,7 @@ static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *w
+ 				php_stream_wrapper_log_error(wrapper, options,
+ 					"HTTP invalid response format (space in header name)!");
+ 				zend_string_efree(last_header_line_str);
+-				return NULL;
++				return false;
+ 			}
+ 			++last_header_name;
+ 		}
+@@ -280,7 +276,7 @@ static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *w
+ 		php_stream_wrapper_log_error(wrapper, options,
+ 				"HTTP invalid response format (no colon in header line)!");
+ 		zend_string_efree(last_header_line_str);
+-		return NULL;
++		return false;
+ 	}
+ 
+ 	bool store_header = true;
+@@ -305,7 +301,7 @@ static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *w
+ 					"HTTP Location header size is over the limit of %d bytes",
+ 					HTTP_HEADER_MAX_LOCATION_SIZE);
+ 			zend_string_efree(last_header_line_str);
+-			return NULL;
++			return false;
+ 		}
+ 		if (header_info->location_len == 0) {
+ 			header_info->location = emalloc(last_header_value_len + 1);
+@@ -353,7 +349,7 @@ static zend_string *php_stream_http_response_headers_parse(php_stream_wrapper *w
+ 		zend_string_efree(last_header_line_str);
+ 	}
+ 
+-	return NULL;
++	return false;
+ }
+ 
+ static php_stream *php_stream_url_wrap_http_ex(php_stream_wrapper *wrapper,
+@@ -370,7 +366,7 @@ static php_stream *php_stream_url_wrap_http_ex(php_stream_wrapper *wrapper,
+ 	zval *ua_zval = NULL, *tmpzval = NULL, ssl_proxy_peer_name;
+ 	int reqok = 0;
+ 	char *http_header_line = NULL;
+-	zend_string *last_header_line_str = NULL;
++	smart_str last_header = {0};
+ 	php_stream_http_response_header_info header_info;
+ 	char tmp_line[128];
+ 	size_t chunk_size = 0;
+@@ -1015,12 +1011,12 @@ finish:
+ 				last_line = false;
+ 			}
+ 			
+-			if (last_header_line_str != NULL) {
++			if (last_header.s != NULL) {
+ 				/* Parse last header line. */
+-				last_header_line_str = php_stream_http_response_headers_parse(wrapper, stream,
+-						context, options, last_header_line_str, http_header_line,
++				bool folded = php_stream_http_response_headers_parse(wrapper, stream,
++						context, options, &last_header, http_header_line,
+ 						&http_header_line_length, response_code, response_header, &header_info);
+-				if (EXPECTED(last_header_line_str == NULL)) {
++				if (EXPECTED(!folded)) {
+ 					if (UNEXPECTED(header_info.error)) {
+ 						php_stream_close(stream);
+ 						stream = NULL;
+@@ -1044,20 +1040,20 @@ finish:
+ 			}
+ 			if (last_line) {
+ 				/* For the last line the last header line must be NULL. */
+-				ZEND_ASSERT(last_header_line_str == NULL);
++				ZEND_ASSERT(last_header.s == NULL);
+ 				break;
+ 			}
+ 			/* Save current line as the last line so it gets parsed in the next round. */
+-			last_header_line_str = zend_string_init(http_header_line, http_header_line_length, 0);
++			smart_str_appendl(&last_header, http_header_line, http_header_line_length);
+ 		} else {
+ 			break;
+ 		}
+ 	}
+ 
+ 	/* If the stream was closed early, we still want to process the last line to keep BC. */
+-	if (last_header_line_str != NULL) {
++	if (last_header.s != NULL) {
+ 		php_stream_http_response_headers_parse(wrapper, stream, context, options,
+-				last_header_line_str, NULL, NULL, response_code, response_header, &header_info);
++				&last_header, NULL, NULL, response_code, response_header, &header_info);
+ 	}
+ 
+ 	if (!reqok || (header_info.location != NULL && header_info.follow_location)) {
+@@ -1186,6 +1182,7 @@ finish:
+ out:
+ 
+ 	smart_str_free(&req_buf);
++	smart_str_free(&last_header);
+ 
+ 	if (http_header_line) {
+ 		efree(http_header_line);

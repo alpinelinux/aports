@@ -1,0 +1,101 @@
+From 4e958968e3d0e66910376f5fad9c6c7e1e69d32e Mon Sep 17 00:00:00 2001
+From: Jakub Zelenka <bukka@php.net>
+Date: Mon, 26 Oct 2026 18:54:31 +0100
+Subject: [PATCH 03/12] Fix GHSA-5j3f-64r7-f564: PATH_INFO underflow in CGI
+ init_request_info()
+
+When the suffix stripped from SCRIPT_FILENAME (or PATH_TRANSLATED) is
+longer than PATH_INFO, the re-derived PATH_INFO pointed before the value
+and was then read, written and copied from. Only rewrite PATH_INFO when
+it is longer than the stripped suffix, as FPM has done since the
+CVE-2019-11043 fix.
+
+(cherry picked from commit 964cdcfa5adfa577cde97df89fc8fda04815694d)
+---
+ sapi/cgi/cgi_main.c                     |  4 +-
+ sapi/cgi/tests/ghsa-5j3f-64r7-f564.phpt | 60 +++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+), 2 deletions(-)
+ create mode 100644 sapi/cgi/tests/ghsa-5j3f-64r7-f564.phpt
+
+diff --git a/sapi/cgi/cgi_main.c b/sapi/cgi/cgi_main.c
+index c7bb7ccabf9..17cec1553e8 100644
+--- a/sapi/cgi/cgi_main.c
++++ b/sapi/cgi/cgi_main.c
+@@ -1284,9 +1284,9 @@ static void init_request_info(fcgi_request *request)
+ 						 */
+ 						size_t slen = len - strlen(pt);
+ 						size_t pilen = env_path_info ? strlen(env_path_info) : 0;
+-						char *path_info = env_path_info ? env_path_info + pilen - slen : NULL;
++						char *path_info = (env_path_info && pilen > slen) ? env_path_info + pilen - slen : NULL;
+ 
+-						if (orig_path_info != path_info) {
++						if (path_info && orig_path_info != path_info) {
+ 							if (orig_path_info) {
+ 								char old;
+ 
+diff --git a/sapi/cgi/tests/ghsa-5j3f-64r7-f564.phpt b/sapi/cgi/tests/ghsa-5j3f-64r7-f564.phpt
+new file mode 100644
+index 00000000000..cab27ad5857
+--- /dev/null
++++ b/sapi/cgi/tests/ghsa-5j3f-64r7-f564.phpt
+@@ -0,0 +1,60 @@
++--TEST--
++GHSA-5j3f-64r7-f564 (PATH_INFO underflow when the stripped suffix is longer than PATH_INFO)
++--SKIPIF--
++<?php include "skipif.inc"; ?>
++--FILE--
++<?php
++include "include.inc";
++
++$php = get_cgi_path();
++$script = __DIR__ . "/ghsa-5j3f-64r7-f564.target.php";
++file_put_contents($script, '<?php var_dump($_SERVER["PATH_INFO"] ?? null, $_SERVER["ORIG_PATH_INFO"] ?? null);');
++
++function run_cgi(string $php, array $env): void {
++    /* Keep what is needed to start the binary (e.g. sanitizer runtime on Windows). */
++    $base_env = array_filter([
++        "PATH" => getenv("PATH"),
++        "SystemRoot" => getenv("SystemRoot"),
++    ], 'is_string');
++    $p = proc_open(
++        [$php, "-n", "-d", "cgi.fix_pathinfo=1"],
++        [0 => ["pipe", "r"], 1 => ["pipe", "w"]],
++        $pipes,
++        null,
++        $env + ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "GET"] + $base_env
++    );
++    fclose($pipes[0]);
++    $out = stream_get_contents($pipes[1]);
++    fclose($pipes[1]);
++    proc_close($p);
++    echo substr($out, strpos($out, "\r\n\r\n") + 4);
++}
++
++echo "Suffix shorter than PATH_INFO\n";
++run_cgi($php, ["SCRIPT_FILENAME" => "$script/b", "PATH_INFO" => "/a/b"]);
++
++echo "Suffix longer than PATH_INFO\n";
++run_cgi($php, ["SCRIPT_FILENAME" => "$script/xxxxxxxxxxxxxxxx", "PATH_INFO" => "/x"]);
++
++echo "Suffix taken from PATH_TRANSLATED\n";
++run_cgi($php, [
++    "SCRIPT_FILENAME" => $php,
++    "PATH_TRANSLATED" => "$script/xxxxxxxxxxxxxxxx",
++    "REDIRECT_URL" => "/redirected",
++    "PATH_INFO" => "/x",
++]);
++?>
++--CLEAN--
++<?php
++@unlink(__DIR__ . "/ghsa-5j3f-64r7-f564.target.php");
++?>
++--EXPECT--
++Suffix shorter than PATH_INFO
++string(2) "/b"
++string(4) "/a/b"
++Suffix longer than PATH_INFO
++string(2) "/x"
++NULL
++Suffix taken from PATH_TRANSLATED
++string(2) "/x"
++NULL
