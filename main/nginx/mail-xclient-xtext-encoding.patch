@@ -1,0 +1,135 @@
+Patch-Source: https://github.com/nginx/nginx/commit/aa714a1e87bfd0f6807f4333a5b354de583e7e92
+--
+From fbfee7488ae6692c4c5432d4b2d56c4fedbc025c Mon Sep 17 00:00:00 2001
+From: Sergey Kandaurov <pluknet@nginx.com>
+Date: Thu, 11 Sep 2025 18:23:10 +0400
+Subject: [PATCH] Mail: xtext encoding (RFC 3461) in XCLIENT LOGIN.
+
+The XCLIENT command uses xtext encoding for attribute values,
+as specified in https://www.postfix.org/XCLIENT_README.html.
+
+Reported by Igor Morgenstern of Aisle Research.
+
+(cherry picked from commit aa714a1e87bfd0f6807f4333a5b354de583e7e92)
+---
+ src/core/ngx_string.c            | 32 +++++++++++++++++++++++++++++---
+ src/core/ngx_string.h            |  1 +
+ src/mail/ngx_mail_proxy_module.c | 14 +++++++++++++-
+ 3 files changed, 43 insertions(+), 4 deletions(-)
+
+diff --git a/src/core/ngx_string.c b/src/core/ngx_string.c
+index f8f738472..10fe764c3 100644
+--- a/src/core/ngx_string.c
++++ b/src/core/ngx_string.c
+@@ -1494,8 +1494,9 @@ ngx_utf8_cpystrn(u_char *dst, u_char *src, size_t n, size_t len)
+ uintptr_t
+ ngx_escape_uri(u_char *dst, u_char *src, size_t size, ngx_uint_t type)
+ {
+-    ngx_uint_t      n;
++    u_char          prefix;
+     uint32_t       *escape;
++    ngx_uint_t      n;
+     static u_char   hex[] = "0123456789ABCDEF";
+ 
+     /*
+@@ -1633,11 +1634,36 @@ ngx_escape_uri(u_char *dst, u_char *src, size_t size, ngx_uint_t type)
+ 
+                     /* mail_auth is the same as memcached */
+ 
++                    /* " ", "+", "=", not allowed */
++
++    static uint32_t   mail_xtext[] = {
++        0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
++
++                    /* ?>=< ;:98 7654 3210  /.-, +*)( '&%$ #"!  */
++        0x20000801, /* 0010 0000 0000 0000  0000 1000 0000 0001 */
++
++                    /* _^]\ [ZYX WVUT SRQP  ONML KJIH GFED CBA@ */
++        0x00000000, /* 0000 0000 0000 0000  0000 0000 0000 0000 */
++
++                    /*  ~}| {zyx wvut srqp  onml kjih gfed cba` */
++        0x80000000, /* 1000 0000 0000 0000  0000 0000 0000 0000 */
++
++        0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
++        0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
++        0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
++        0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
++    };
++
+     static uint32_t  *map[] =
+-        { uri, args, uri_component, html, refresh, memcached, memcached };
++        { uri, args, uri_component, html, refresh, memcached, memcached,
++          mail_xtext };
++
++    static u_char  map_char[] =
++        { '%', '%', '%', '%', '%', '%', '%', '+' };
+ 
+ 
+     escape = map[type];
++    prefix = map_char[type];
+ 
+     if (dst == NULL) {
+ 
+@@ -1658,7 +1684,7 @@ ngx_escape_uri(u_char *dst, u_char *src, size_t size, ngx_uint_t type)
+ 
+     while (size) {
+         if (escape[*src >> 5] & (1U << (*src & 0x1f))) {
+-            *dst++ = '%';
++            *dst++ = prefix;
+             *dst++ = hex[*src >> 4];
+             *dst++ = hex[*src & 0xf];
+             src++;
+diff --git a/src/core/ngx_string.h b/src/core/ngx_string.h
+index 713eb42a7..183a20521 100644
+--- a/src/core/ngx_string.h
++++ b/src/core/ngx_string.h
+@@ -203,6 +203,7 @@ u_char *ngx_utf8_cpystrn(u_char *dst, u_char *src, size_t n, size_t len);
+ #define NGX_ESCAPE_REFRESH        4
+ #define NGX_ESCAPE_MEMCACHED      5
+ #define NGX_ESCAPE_MAIL_AUTH      6
++#define NGX_ESCAPE_MAIL_XTEXT     7
+ 
+ #define NGX_UNESCAPE_URI       1
+ #define NGX_UNESCAPE_REDIRECT  2
+diff --git a/src/mail/ngx_mail_proxy_module.c b/src/mail/ngx_mail_proxy_module.c
+index efed9ab3e..36ca54d1b 100644
+--- a/src/mail/ngx_mail_proxy_module.c
++++ b/src/mail/ngx_mail_proxy_module.c
+@@ -531,6 +531,7 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
+     ngx_int_t                  rc;
+     ngx_str_t                  line, auth, encoded;
+     ngx_buf_t                 *b;
++    uintptr_t                  n;
+     ngx_connection_t          *c;
+     ngx_mail_session_t        *s;
+     ngx_mail_proxy_conf_t     *pcf;
+@@ -627,6 +628,10 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
+                           CRLF) - 1
+                    + s->connection->addr_text.len + s->login.len + s->host.len;
+ 
++        n = ngx_escape_uri(NULL, s->login.data, s->login.len,
++                           NGX_ESCAPE_MAIL_XTEXT);
++        line.len += n * 2;
++
+ #if (NGX_HAVE_INET6)
+         if (s->connection->sockaddr->sa_family == AF_INET6) {
+             line.len += sizeof("IPV6:") - 1;
+@@ -654,7 +659,14 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
+ 
+         if (s->login.len && !pcf->smtp_auth) {
+             p = ngx_cpymem(p, " LOGIN=", sizeof(" LOGIN=") - 1);
+-            p = ngx_copy(p, s->login.data, s->login.len);
++
++            if (n == 0) {
++                p = ngx_copy(p, s->login.data, s->login.len);
++
++            } else {
++                p = (u_char *) ngx_escape_uri(p, s->login.data, s->login.len,
++                                              NGX_ESCAPE_MAIL_XTEXT);
++            }
+         }
+ 
+         p = ngx_cpymem(p, " NAME=", sizeof(" NAME=") - 1);
+-- 
+2.56.0
+
