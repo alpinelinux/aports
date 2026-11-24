@@ -1,0 +1,45 @@
+From 58a8e5d6041fa41250dfee65fdbfa9ee15c30fc5 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Tue, 24 Nov 2026 17:43:47 +0100
+Subject: [PATCH] Publish a restored spesh log only after it is initialized
+
+When a thread has run out of spesh log quota, the spesh worker creates a
+new log for it and stores the pointer into the other thread's
+tc->spesh_log. That thread then reads the log's entries, used and limit
+fields without any synchronization. Without a barrier between creating
+the log and publishing it, a weakly ordered CPU may make the pointer
+visible before the initialized fields. The other thread then writes
+through a NULL entries pointer, or sees a zero limit and writes past the
+end of the entries buffer, corrupting the heap.
+
+Seen as random segfaults in MVM_spesh_log_entry, "Merging GLOBAL symbols
+failed: duplicate definition of symbol" errors and hangs while
+precompiling modules on a SpacemiT X100 (riscv64).
+---
+ src/spesh/worker.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/spesh/worker.c b/src/spesh/worker.c
+index 88a9e80be..68bb85e7d 100644
+--- a/src/spesh/worker.c
++++ b/src/spesh/worker.c
+@@ -278,7 +278,15 @@ static void worker(MVMThreadContext *tc, MVMArgs arg_info) {
+                     if (stc) {
+                         if (!sl->body.was_compunit_bumped) {
+                             if (MVM_incr(&(stc->spesh_log_quota)) == 0) {
+-                                stc->spesh_log = MVM_spesh_log_create(tc, sl->body.thread);
++                                MVMSpeshLog *new_log = MVM_spesh_log_create(tc, sl->body.thread);
++                                /* The log is published to another thread, which
++                                 * reads its fields without synchronization. Make
++                                 * sure the initialized log is visible before the
++                                 * pointer to it is, or weakly ordered CPUs may
++                                 * let the other thread see a NULL entries pointer
++                                 * or a zero limit. */
++                                MVM_barrier();
++                                stc->spesh_log = new_log;
+                                 MVM_telemetry_timestamp(stc, "logging restored after quota had run out");
+                             }
+                         }
+-- 
+2.56.1
+
