@@ -1,0 +1,95 @@
+From: Roger Pau Monne <roger@xenproject.org>
+Date: Tue, 27 Oct 2026 09:02:32 +0100
+Subject: [PATCH 3/3] x86/mm: take an extra page reference in p2m_add_foreign()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+p2m_add_foreign() holds the domain's p2m lock when calling
+guest_remove_page(), which inhibits the p2m TLB flush when
+guest_remove_page() releases the gfn.  However p2m_add_foreign() does not
+hold a reference to the removed page, and so the page is freed when
+guest_remove_page() calls put_page() on it.  This is problematic, as the
+page is freed before the p2m TLB is flushed.
+
+Modify p2m_add_foreign() so it takes a reference to the page to be removed,
+and make sure that reference is only dropped after the p2m lock has been
+released.  Note the GFN to be removed needs to be unshared before the
+reference is taken, as otherwise the call to get_page() would fail if the
+entry is shared.
+
+Also add an ASSERT() to ensure the function is called without the p2m being
+already locked, so that we ensure the last put_gfn() in the function
+performs a p2m flush if needed.
+
+This is XSA-535 / CVE-2026-119783
+
+Signed-off-by: Roger Pau Monné <roger@xenproject.org>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm/p2m.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index 588aedbb28bc..578d00ee3093 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1910,10 +1910,12 @@ static int p2m_add_foreign(struct domain *tdom, unsigned long fgfn,
+ {
+     p2m_type_t p2mt, p2mt_prev;
+     mfn_t prev_mfn, mfn;
+-    struct page_info *page;
++    struct page_info *page, *prev_page = NULL;
+     int rc;
+     struct domain *fdom;
+ 
++    ASSERT(!p2m_locked_by_me(p2m_get_hostp2m(tdom)));
++
+     if ( !arch_acquire_resource_check(tdom) )
+         return -EPERM;
+ 
+@@ -1953,15 +1955,30 @@ static int p2m_add_foreign(struct domain *tdom, unsigned long fgfn,
+     mfn = page_to_mfn(page);
+ 
+     /* Remove previously mapped page if it is present. */
+-    prev_mfn = get_gfn(tdom, gpfn, &p2mt_prev);
++    prev_mfn = get_gfn_unshare(tdom, gpfn, &p2mt_prev);
++    if ( p2m_is_shared(p2mt_prev) )
++    {
++        rc = -ENOMEM;
++        goto put_both;
++    }
++
+     if ( mfn_valid(prev_mfn) )
+     {
+         if ( is_special_page(mfn_to_page(prev_mfn)) )
+             /* Special pages are simply unhooked from this phys slot */
+             rc = p2m_remove_page(tdom, _gfn(gpfn), prev_mfn, 0);
+         else
++        {
++            prev_page = mfn_to_page(prev_mfn);
++            if ( !get_page(prev_page, tdom) )
++            {
++                prev_page = NULL;
++                rc = -ENXIO;
++                goto put_both;
++            }
+             /* Normal domain memory is freed, to avoid leaking memory. */
+             rc = guest_remove_page(tdom, gpfn);
++        }
+         if ( rc )
+             goto put_both;
+     }
+@@ -1984,6 +2001,9 @@ static int p2m_add_foreign(struct domain *tdom, unsigned long fgfn,
+      */
+     put_gfn(tdom, gpfn);
+ 
++    if ( prev_page )
++        put_page(prev_page);
++
+  put_one:
+     put_page(page);
+ 
+-- 
+2.55.0
+
