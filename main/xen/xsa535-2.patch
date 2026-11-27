@@ -1,0 +1,102 @@
+From: Roger Pau Monne <roger@xenproject.org>
+Date: Tue, 27 Oct 2026 09:02:05 +0100
+Subject: [PATCH 2/3] x86/mm: take an extra page reference in
+ xenmem_add_to_physmap_one()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+xenmem_add_to_physmap_one() holds the domain's p2m lock when calling
+guest_remove_page(), which inhibits the p2m TLB flush when
+guest_remove_page() releases the gfn.  However xenmem_add_to_physmap_one()
+does not hold a reference to the removed page, and so the page is freed
+when guest_remove_page() calls put_page() on it.  This is problematic, as
+the page is freed before the p2m TLB is flushed.
+
+Modify xenmem_add_to_physmap_one() so it takes a reference to the page to
+be removed, and make sure that reference is only dropped after the p2m lock
+has been released.  Note the GFN to be removed needs to be unshared before
+the reference is taken, as otherwise the call to get_page() would fail if
+the entry is shared.
+
+Also add an ASSERT() to ensure the function is called without the p2m being
+already locked, so that we ensure the last put_gfn() in the function
+performs a p2m flush if needed.
+
+This is XSA-535 / CVE-2026-119782
+
+Signed-off-by: Roger Pau Monné <roger@xenproject.org>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/arch/x86/mm/p2m.c | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index bb0356396ce1..588aedbb28bc 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -2001,13 +2001,15 @@ int xenmem_add_to_physmap_one(
+     unsigned long idx,
+     gfn_t gfn)
+ {
+-    struct page_info *page = NULL;
++    struct page_info *page = NULL, *prev_page = NULL;
+     unsigned long gmfn = 0 /* gcc ... */, old_gfn;
+     mfn_t prev_mfn;
+     int rc = 0;
+     mfn_t mfn = INVALID_MFN;
+     p2m_type_t p2mt;
+ 
++    ASSERT(!p2m_locked_by_me(p2m_get_hostp2m(d)));
++
+     switch ( space )
+     {
+     case XENMAPSPACE_shared_info:
+@@ -2063,8 +2065,15 @@ int xenmem_add_to_physmap_one(
+      * general, for pages which can subsequently be freed this imperative:
+      * Upon freeing we wouldn't be able to find other mappings in the P2M
+      * (unless we did a brute force search).
++     *
++     * FIXME: remove a shared p2m entry directly, without unsharing first.
+      */
+-    prev_mfn = get_gfn(d, gfn_x(gfn), &p2mt);
++    prev_mfn = get_gfn_unshare(d, gfn_x(gfn), &p2mt);
++    if ( p2m_is_shared(p2mt) )
++    {
++        rc = -ENOMEM;
++        goto put_all;
++    }
+ 
+     /* XENMAPSPACE_gmfn: Check if the MFN is associated with another GFN. */
+     old_gfn = get_gpfn_from_mfn(mfn_x(mfn));
+@@ -2084,8 +2093,17 @@ int xenmem_add_to_physmap_one(
+             /* Special pages are simply unhooked from this phys slot. */
+             rc = p2m_remove_page(d, gfn, prev_mfn, PAGE_ORDER_4K);
+         else if ( !mfn_eq(mfn, prev_mfn) )
++        {
++            prev_page = mfn_to_page(prev_mfn);
++            if ( !get_page(prev_page, d) )
++            {
++                prev_page = NULL;
++                rc = -ENXIO;
++                goto put_all;
++            }
+             /* Normal domain memory is freed, to avoid leaking memory. */
+             rc = guest_remove_page(d, gfn_x(gfn));
++        }
+     }
+ 
+     /* Unmap from old location, if any. */
+@@ -2127,6 +2145,9 @@ int xenmem_add_to_physmap_one(
+     if ( page )
+         put_page(page);
+ 
++    if ( prev_page )
++        put_page(prev_page);
++
+     return rc;
+ }
+ 
+-- 
+2.55.0
+
