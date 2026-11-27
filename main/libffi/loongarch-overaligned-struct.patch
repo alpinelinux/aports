@@ -1,0 +1,63 @@
+LoongArch: reserve space for over-aligned by-reference struct copies
+
+ffi_call_int places copies of by-reference structs top-down from the end
+of an area sized by cif->bytes, but ffi_prep_cif reserves alignment
+padding for a bottom-up layout. For a 128-byte aligned struct followed
+by a large struct (struct_overaligned.c, second call) the second copy
+underflowed the area and clobbered the call frame.
+
+Round the address of each copy rather than its offset, as aarch64 does,
+and reserve up to the alignment of each over-aligned struct.
+
+--- a/src/loongarch/ffi.c
++++ b/src/loongarch/ffi.c
+@@ -274,12 +274,14 @@
+ allocate_and_copy_struct_to_stack (call_builder *cb, void *data,
+ 				   ffi_type *type)
+ {
+-  size_t dest = cb->next_struct_area - type->size;
++  char *dest = (char *) cb->stack + cb->next_struct_area - type->size;
+ 
+-  dest = FFI_ALIGN_DOWN (dest, type->alignment);
+-  cb->next_struct_area = dest;
++  /* Round the address, not the offset: the area is only STKALIGN aligned.
++     ffi_call_int reserves what this can skip for over-aligned types.  */
++  dest = (char *) FFI_ALIGN_DOWN (dest, type->alignment);
++  cb->next_struct_area = (size_t) (dest - (char *) cb->stack);
+ 
+-  return memcpy ((char *)cb->stack + dest, data, type->size);
++  return memcpy (dest, data, type->size);
+ }
+ 
+ /* Adds an argument to a call, or a not by reference return value.  */
+@@ -461,8 +463,21 @@
+ ffi_call_int (ffi_cif *cif, void (*fn) (void), void *rvalue, void **avalue,
+ 	      void *closure)
+ {
+-  size_t arg_bytes = FFI_ALIGN (cif->bytes, STKALIGN);
++  size_t arg_bytes = cif->bytes;
++  int i;
+ 
++  /* Copies of by-reference arguments are placed top-down and their
++     addresses rounded down, which can skip up to alignment - 1 bytes
++     that the bottom-up layout of ffi_prep_cif did not reserve.  */
++  for (i = 0; i < cif->nargs; i++)
++    {
++      ffi_type *ty = cif->arg_types[i];
++      if (ty->size > 2 * __SIZEOF_POINTER__
++	  && ty->alignment > __SIZEOF_POINTER__)
++	arg_bytes += ty->alignment;
++    }
++  arg_bytes = FFI_ALIGN (arg_bytes, STKALIGN);
++
+   /* This is a conservative estimate, assuming a complex return value and
+      that all remaining arguments are long long / __int128 */
+   size_t extra_bytes = cif->nargs <= 3 ? 0 :
+@@ -499,7 +514,6 @@
+   if (return_by_ref)
+     cb.aregs->a[cb.used_integer++] = (size_t)rvalue;
+ 
+-  int i;
+   for (i = 0; i < cif->nargs; i++)
+     marshal (&cb, cif->arg_types[i], i >= cif->loongarch_nfixedargs,
+ 	     avalue[i]);
