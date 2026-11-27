@@ -1,0 +1,69 @@
+From: Roger Pau Monne <roger@xenproject.org>
+Date: Mon, 26 Oct 2026 18:11:43 +0100
+Subject: [PATCH 1/3] xen/mm: reorder page vs gfn release order in
+ guest_remove_page()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The current order of put_page() and put_gfn() calls can lead to the removed
+page being freed before performing a p2m TLB flush, if the caller of
+guest_remove_page() doesn't hold a reference to the page being unhooked
+from the p2m.
+
+Invert the call order, so that the p2m is unlocked first, possibly carrying
+any deferred flushes, and the page is released afterwards.  This fixes the
+usage of guest_remove_page() in decrease_reservation(), that would
+otherwise free the pages before the p2m flush.
+
+Note there are calls to guest_remove_page() with the p2m lock already held;
+those are dealt with in separate changes.
+
+This is XSA-535 / CVE-2026-119781
+
+Fixes: 09fc40ed3054 ("x86/ept: defer the invalidation until the p2m lock is released")
+Fixes: e1604ea82700 ("x86/hap: Defer NPT P2M TLB flushes")
+Signed-off-by: Roger Pau Monné <roger@xenproject.org>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+ xen/common/memory.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/xen/common/memory.c b/xen/common/memory.c
+index 4afa2271b7fe..3abdf27d2d3b 100644
+--- a/xen/common/memory.c
++++ b/xen/common/memory.c
+@@ -408,7 +408,7 @@ out:
+ 
+ int guest_remove_page(struct domain *d, unsigned long gmfn)
+ {
+-    struct page_info *page;
++    struct page_info *page = NULL;
+ #ifdef CONFIG_X86
+     p2m_type_t p2mt;
+ #endif
+@@ -529,13 +529,19 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
+     if ( !rc && !is_domain_direct_mapped(d) )
+         put_page_alloc_ref(page);
+ 
+-    put_page(page);
+-
+ #ifdef CONFIG_X86
+  out_put_gfn:
+     put_gfn(d, gmfn);
+ #endif
+ 
++    /*
++     * Do the final put page after the p2m flush possibly done when putting the
++     * gfn.  Otherwise we risk freeing the page while there are stale p2m TLB
++     * entries.
++     */
++    if ( page )
++        put_page(page);
++
+     /*
+      * Filter out -ENOENT return values that aren't a result of an empty p2m
+      * entry.
+-- 
+2.55.0
+
