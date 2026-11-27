@@ -1,0 +1,659 @@
+Patch-Source: https://github.com/ndmitchell/hlint/pull/1713
+Backported for 3.10.
+---
+diff --git a/hlint.cabal b/hlint.cabal
+index c3c8e2d..2e19ec1 100644
+--- a/hlint.cabal
++++ b/hlint.cabal
+@@ -36,7 +36,7 @@ extra-source-files:
+ extra-doc-files:
+     README.md
+     CHANGES.txt
+-tested-with:        GHC==9.12, GHC==9.10, GHC==9.8
++tested-with:        GHC==9.14, GHC==9.12, GHC==9.10
+ 
+ source-repository head
+     type:     git
+@@ -81,16 +81,16 @@ library
+         deriving-aeson >= 0.2,
+         filepattern >= 0.1.1
+ 
+-    if !flag(ghc-lib) && impl(ghc >= 9.12.1) && impl(ghc < 9.13.0)
++    if !flag(ghc-lib) && impl(ghc >= 9.14.1) && impl(ghc < 9.15.0)
+       build-depends:
+-        ghc == 9.12.*,
++        ghc == 9.14.*,
+         ghc-boot-th,
+         ghc-boot
+     else
+       build-depends:
+-          ghc-lib-parser == 9.12.*
++          ghc-lib-parser == 9.14.*
+     build-depends:
+-        ghc-lib-parser-ex >= 9.12.0.0 && < 9.13.0
++        ghc-lib-parser-ex >= 9.14 && < 9.15
+ 
+     if flag(gpl)
+         build-depends: hscolour >= 1.21
+@@ -185,3 +185,5 @@ executable hlint
+     ghc-options:        -rtsopts -with-rtsopts=-A32m
+     if flag(threaded)
+         ghc-options:    -threaded
++    if os(darwin)
++        ld-options:     -framework Security
+diff --git a/src/Config/Compute.hs b/src/Config/Compute.hs
+index e916179..67e9077 100644
+--- a/src/Config/Compute.hs
++++ b/src/Config/Compute.hs
+@@ -9,6 +9,7 @@ import GHC.Util
+ import Config.Type
+ import Fixity
+ import Data.Generics.Uniplate.DataOnly
++import Data.List.NonEmpty(NonEmpty(..))
+ import GHC.Hs hiding (Warning)
+ import GHC.Types.Name.Reader
+ import GHC.Types.Name
+@@ -56,7 +57,7 @@ findBind FunBind{fun_id, fun_matches} = findExp (unLoc fun_id) [] $ HsLam noAnn
+ findBind _ = []
+ 
+ findExp :: IdP GhcPs -> [String] -> HsExpr GhcPs -> [Setting]
+-findExp name vs (HsLam _ LamSingle MG{mg_alts=L _ [L _ Match{m_pats=L _ pats, m_grhss=GRHSs{grhssGRHSs=[L _ (GRHS _ [] x)], grhssLocalBinds=(EmptyLocalBinds _)}}]})
++findExp name vs (HsLam _ LamSingle MG{mg_alts=L _ [L _ Match{m_pats=L _ pats, m_grhss=GRHSs{grhssGRHSs=(L _ (GRHS _ [] x) :| []), grhssLocalBinds=(EmptyLocalBinds _)}}]})
+     = if length pats == length ps then findExp name (vs++ps) $ unLoc x else []
+     where ps = [rdrNameStr x | L _ (VarPat _ x) <- pats]
+ findExp name vs HsLam{} = []
+diff --git a/src/GHC/Util/Brackets.hs b/src/GHC/Util/Brackets.hs
+index c3f27c8..60d0057 100644
+--- a/src/GHC/Util/Brackets.hs
++++ b/src/GHC/Util/Brackets.hs
+@@ -35,7 +35,7 @@ instance Brackets (LocatedA (HsExpr GhcPs)) where
+ 
+   isAtom (L _ x) = case x of
+       HsVar{} -> True
+-      HsUnboundVar{} -> True
++      HsHole{} -> True
+       -- Only relevant for OverloadedRecordDot extension
+       HsGetField{} -> True
+       HsOverLabel{} -> True
+@@ -59,12 +59,10 @@ instance Brackets (LocatedA (HsExpr GhcPs)) where
+       _  -> False
+       where
+         isNegativeLit (HsInt _ i) = il_neg i
+-        isNegativeLit (HsRat _ f _) = fl_neg f
+         isNegativeLit (HsFloatPrim _ f) = fl_neg f
+         isNegativeLit (HsDoublePrim _ f) = fl_neg f
+         isNegativeLit (HsIntPrim _ x) = x < 0
+         isNegativeLit (HsInt64Prim _ x) = x < 0
+-        isNegativeLit (HsInteger _ x _) = x < 0
+         isNegativeLit _ = False
+         isNegativeOverLit OverLit {ol_val=HsIntegral i} = il_neg i
+         isNegativeOverLit OverLit {ol_val=HsFractional f} = fl_neg f
+@@ -119,7 +117,7 @@ instance Brackets (LocatedA (Pat GhcPs)) where
+     ConPat _ _ RecCon{} -> False
+     -- Before we only checked args, but not type args, resulting in a
+     -- false positive for things like (Proxy @a)
+-    ConPat _ _ (PrefixCon [] []) -> True
++    ConPat _ _ (PrefixCon []) -> True
+     VarPat{} -> True
+     WildPat{} -> True
+     SumPat{} -> True
+@@ -131,8 +129,6 @@ instance Brackets (LocatedA (Pat GhcPs)) where
+       isSignedLit HsInt{} = True
+       isSignedLit HsIntPrim{} = True
+       isSignedLit HsInt64Prim{} = True
+-      isSignedLit HsInteger{} = True
+-      isSignedLit HsRat{} = True
+       isSignedLit HsFloatPrim{} = True
+       isSignedLit HsDoublePrim{} = True
+       isSignedLit _ = False
+diff --git a/src/GHC/Util/FreeVars.hs b/src/GHC/Util/FreeVars.hs
+index 315150c..bb31b82 100644
+--- a/src/GHC/Util/FreeVars.hs
++++ b/src/GHC/Util/FreeVars.hs
+@@ -18,6 +18,7 @@ import Data.Generics.Uniplate.DataOnly
+ import Data.Monoid
+ import Data.Semigroup
+ import Data.List.Extra
++import Data.List.NonEmpty(toList)
+ import Data.Set (Set)
+ import Data.Set qualified as Set
+ import Prelude
+@@ -97,7 +98,7 @@ unqualNames _ = []
+ 
+ instance FreeVars (LocatedA (HsExpr GhcPs)) where
+   freeVars (L _ (HsVar _ x)) = Set.fromList $ unqualNames x -- Variable.
+-  freeVars (L _ (HsUnboundVar _ x)) = Set.fromList [rdrNameOcc x] -- Unbound variable; also used for "holes".
++  freeVars (L _ (HsHole (HoleVar (L _ x)))) = Set.fromList [rdrNameOcc x] -- Unbound variable; also used for "holes".
+   freeVars (L _ (HsLam _ LamSingle mg)) = free (allVars mg) -- Lambda abstraction. Currently always a single match.
+   freeVars (L _ (HsLam _ _ MG{mg_alts=(L _ ms)})) = free (allVars ms) -- Lambda case
+   freeVars (L _ (HsCase _ of_ MG{mg_alts=(L _ ms)})) = freeVars of_ ^+ free (allVars ms) -- Case expr.
+@@ -123,7 +124,7 @@ instance FreeVars (LocatedA (HsExpr GhcPs)) where
+     case flds of
+       RegularRecUpdFields _ fs -> Set.unions $ freeVars e : map freeVars fs
+       OverloadedRecUpdFields _ ps -> Set.unions $ freeVars e : map freeVars ps
+-  freeVars (L _ (HsMultiIf _ grhss)) = free (allVars grhss) -- Multi-way if.
++  freeVars (L _ (HsMultiIf _ grhss)) = free (allVars (toList grhss)) -- Multi-way if.
+   freeVars (L _ (HsTypedBracket _ e)) = freeVars e
+   freeVars (L _ (HsUntypedBracket _ (ExpBr _ e))) = freeVars e
+   freeVars (L _ (HsUntypedBracket _ (VarBr _ _ v))) = Set.fromList [occName (unLoc v)]
+@@ -240,7 +241,7 @@ instance AllVars (HsStmtContext (GenLocated SrcSpanAnnN RdrName)) where
+   allVars _ = mempty
+ 
+ instance AllVars (GRHSs GhcPs (LocatedA (HsExpr GhcPs))) where
+-  allVars (GRHSs _ grhss binds) = inVars binds (mconcatMap allVars grhss)
++  allVars (GRHSs _ grhss binds) = inVars binds (mconcatMap allVars (toList grhss))
+ 
+ instance AllVars (LocatedAn NoEpAnns (GRHS GhcPs (LocatedA (HsExpr GhcPs)))) where
+   allVars (L _ (GRHS _ guards expr)) = Vars (bound gs) (free gs ^+ (freeVars expr ^- bound gs)) where gs = allVars guards
+diff --git a/src/GHC/Util/HsExpr.hs b/src/GHC/Util/HsExpr.hs
+index a753695..088a13a 100644
+--- a/src/GHC/Util/HsExpr.hs
++++ b/src/GHC/Util/HsExpr.hs
+@@ -33,6 +33,7 @@ import Control.Monad.Trans.Writer.CPS
+ import Data.Data
+ import Data.Generics.Uniplate.DataOnly
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..), fromList, toList)
+ import Data.Tuple.Extra
+ import Data.Maybe
+ 
+@@ -57,7 +58,7 @@ dotApps (x : xs) = dotApp x (dotApps xs)
+ 
+ -- | @lambda [p0, p1..pn] body@ makes @\p1 p1 .. pn -> body@
+ lambda :: [LPat GhcPs] -> LHsExpr GhcPs -> LHsExpr GhcPs
+-lambda vs body = noLocA $ HsLam noAnn LamSingle (MG (Generated OtherExpansion DoPmc) (noLocA [noLocA $ Match noExtField (LamAlt LamSingle) (L noSpanAnchor vs) (GRHSs emptyComments [noLocA $ GRHS noAnn [] body] (EmptyLocalBinds noExtField))]))
++lambda vs body = noLocA $ HsLam noAnn LamSingle (MG (Generated OtherExpansion DoPmc) (noLocA [noLocA $ Match noExtField (LamAlt LamSingle) (L noSpanAnchor vs) (GRHSs emptyComments (noLocA (GRHS noAnn [] body) :| []) (EmptyLocalBinds noExtField))]))
+ 
+ -- | 'paren e' wraps 'e' in parens if 'e' is non-atomic.
+ paren :: LHsExpr GhcPs -> LHsExpr GhcPs
+@@ -124,7 +125,7 @@ simplifyExp (L l (OpApp _ x op y)) | isDol op = L l (HsApp noExtField x (nlHsPar
+ simplifyExp e@(L _ (HsLet _ ((HsValBinds _ (ValBinds _ binds []))) z)) =
+   -- An expression of the form, 'let x = y in z'.
+   case binds of
+-    [L _ (FunBind _ _ (MG _ (L _ [L _ (Match _(FunRhs (L _ x) _ _ _) (L _ []) (GRHSs _ [L _ (GRHS _ [] y)] ((EmptyLocalBinds _))))])))]
++    [L _ (FunBind _ _ (MG _ (L _ [L _ (Match _(FunRhs (L _ x) _ _ _) (L _ []) (GRHSs _ (L _ (GRHS _ [] y) :| []) ((EmptyLocalBinds _))))])))]
+          -- If 'x' is not in the free variables of 'y', beta-reduce to
+          -- 'z[(y)/x]'.
+       | occNameStr x `notElem` vars y && length [() | Unqual a <- universeBi z, a == rdrNameOcc x] <= 1 ->
+@@ -239,7 +240,7 @@ niceLambdaR [] e = (e, \s -> [Replace Expr s [("a", toSSA e)] "a"])
+ -- Base case. Just a good old fashioned lambda.
+ niceLambdaR ss e =
+   let grhs = noLocA $ GRHS noAnn [] e :: LGRHS GhcPs (LHsExpr GhcPs)
+-      grhss = GRHSs {grhssExt = emptyComments, grhssGRHSs=[grhs], grhssLocalBinds=EmptyLocalBinds noExtField}
++      grhss = GRHSs {grhssExt = emptyComments, grhssGRHSs=fromList [grhs], grhssLocalBinds=EmptyLocalBinds noExtField}
+       match = noLocA $ Match {m_ext=noExtField, m_ctxt=LamAlt LamSingle, m_pats=noLocA $ map strToPat ss, m_grhss=grhss} :: LMatch GhcPs (LHsExpr GhcPs)
+       matchGroup = MG {mg_ext=Generated OtherExpansion SkipPmc, mg_alts=noLocA [match]}
+   in (noLocA $ HsLam noAnn LamSingle matchGroup, const [])
+@@ -254,12 +255,12 @@ replaceBranches (L s (HsCase _ a (MG FromSource (L l bs)))) =
+   (concatMap f bs, L s . HsCase noAnn a . MG (Generated OtherExpansion SkipPmc). L l . g bs)
+   where
+     f :: LMatch GhcPs (LHsExpr GhcPs) -> [LHsExpr GhcPs]
+-    f (L _ (Match _ CaseAlt _ (GRHSs _ xs _))) = [x | (L _ (GRHS _ _ x)) <- xs]
++    f (L _ (Match _ CaseAlt _ (GRHSs _ xs _))) = [x | (L _ (GRHS _ _ x)) <- toList xs]
+     f _ = error "GHC.Util.HsExpr.replaceBranches: unexpected XMatch"
+ 
+     g :: [LMatch GhcPs (LHsExpr GhcPs)] -> [LHsExpr GhcPs] -> [LMatch GhcPs (LHsExpr GhcPs)]
+     g (L s1 (Match _ CaseAlt a (GRHSs _ ns b)) : rest) xs =
+-      L s1 (Match noExtField CaseAlt a (GRHSs emptyComments [L a (GRHS noAnn gs x) | (L a (GRHS _ gs _), x) <- zip ns as] b)) : g rest bs
++      L s1 (Match noExtField CaseAlt a (GRHSs emptyComments (fromList [L a (GRHS noAnn gs x) | (L a (GRHS _ gs _), x) <- zip (toList ns) as]) b)) : g rest bs
+       where  (as, bs) = splitAt (length ns) xs
+     g [] [] = []
+     g _ _ = error "GHC.Util.HsExpr.replaceBranches': internal invariant failed, lists are of differing lengths"
+diff --git a/src/GHC/Util/Unify.hs b/src/GHC/Util/Unify.hs
+index 66f3a49..444825e 100644
+--- a/src/GHC/Util/Unify.hs
++++ b/src/GHC/Util/Unify.hs
+@@ -120,6 +120,9 @@ unify' nm root x y
+     | Just (x :: EpAnn AnnExplicitSum) <- cast x = Just mempty
+     | Just (x :: EpAnn AnnFieldLabel) <- cast x = Just mempty
+     | Just (x :: EpAnn (AnnList [EpToken ","])) <- cast x = Just mempty
++    | Just (x :: EpAnn (AnnList ())) <- cast x = Just mempty
++    | Just (x :: EpAnn (AnnList (EpToken "where"))) <- cast x = Just mempty
++    | Just (x :: EpAnn (AnnList (EpToken "hiding", [EpToken ","]))) <- cast x = Just mempty
+     | Just (x :: EpAnn AnnListItem) <- cast x = Just mempty
+     | Just (x :: EpAnn AnnParen) <- cast x = Just mempty
+     | Just (x :: EpAnn AnnPragma) <- cast x = Just mempty
+@@ -130,22 +133,38 @@ unify' nm root x y
+     | Just (x :: EpAnn EpAnnHsCase) <- cast x = Just mempty
+     | Just (x :: EpAnn EpAnnImportDecl) <- cast x = Just mempty
+     | Just (x :: EpAnn EpAnnSumPat) <- cast x = Just mempty
+-    | Just (x :: EpAnn EpAnnUnboundVar) <- cast x = Just mempty
+     | Just (x :: EpAnn GrhsAnn) <- cast x = Just mempty
+     | Just (x :: EpAnn HsRuleAnn) <- cast x = Just mempty
+     | Just (x :: EpAnn NameAnn) <- cast x = Just mempty
+     | Just (x :: EpAnn NoEpAnns) <- cast x = Just mempty
+-    | Just (x :: EpToken "let") <- cast x = Just mempty
+-    | Just (x :: EpToken "in") <- cast x = Just mempty
+-    | Just (x :: EpToken "@") <- cast x = Just mempty
++    | Just (x :: EpToken "|") <- cast x = Just mempty
++    | Just (x :: EpToken ",") <- cast x = Just mempty
++    | Just (x :: EpToken ";") <- cast x = Just mempty
++    | Just (x :: EpToken "`") <- cast x = Just mempty
++    | Just (x :: EpToken ".") <- cast x = Just mempty
++    | Just (x :: EpToken "\\") <- cast x = Just mempty
+     | Just (x :: EpToken "(") <- cast x = Just mempty
+     | Just (x :: EpToken ")") <- cast x = Just mempty
++    | Just (x :: EpToken "@") <- cast x = Just mempty
++    | Just (x :: EpToken "#-}") <- cast x = Just mempty
++    | Just (x :: EpToken "if") <- cast x = Just mempty
++    | Just (x :: EpToken "then") <- cast x = Just mempty
++    | Just (x :: EpToken "let") <- cast x = Just mempty
++    | Just (x :: EpToken "else") <- cast x = Just mempty
++    | Just (x :: EpToken "case") <- cast x = Just mempty
++    | Just (x :: EpToken "of") <- cast x = Just mempty
++    | Just (x :: EpToken "in") <- cast x = Just mempty
+     | Just (x :: EpToken "type") <- cast x = Just mempty
+     | Just (x :: EpToken "%") <- cast x = Just mempty
+     | Just (x :: EpToken "%1") <- cast x = Just mempty
+-    | Just (x :: EpToken "⊸") <- cast x = Just mempty
++    | Just (x :: EpToken "proc") <- cast x = Just mempty
++    | Just (x :: EpToken "static") <- cast x = Just mempty
++    | Just (x :: EpToken "qualified") <- cast x = Just mempty
++    | Just (x :: EpToken "safe") <- cast x = Just mempty
++    | Just (x :: EpToken "as") <- cast x = Just mempty
++    | Just (x :: EpToken "import") <- cast x = Just mempty
+     | Just (x :: EpUniToken "->" "→") <- cast x = Just mempty
+-    | Just (x :: TokenLocation) <- cast y = Just mempty
++    | Just (x :: EpUniToken "::" "∷") <- cast x = Just mempty
+     | Just (y :: SrcSpan) <- cast y = Just mempty
+ 
+     | otherwise = unifyDef' nm x y
+diff --git a/src/GHC/Util/View.hs b/src/GHC/Util/View.hs
+index e283a63..198cf46 100644
+--- a/src/GHC/Util/View.hs
++++ b/src/GHC/Util/View.hs
+@@ -13,6 +13,7 @@ import GHC.Types.SrcLoc
+ import GHC.Types.Basic
+ import Language.Haskell.GhclibParserEx.GHC.Types.Name.Reader
+ import GHC.Util.Brackets
++import Data.List.NonEmpty(NonEmpty(..))
+ 
+ fromParen :: LocatedA (HsExpr GhcPs) -> LocatedA (HsExpr GhcPs)
+ fromParen x = maybe x fromParen $ remParen x
+@@ -33,7 +34,7 @@ data LamConst1 = NoLamConst1 | LamConst1 (LocatedA (HsExpr GhcPs))
+ 
+ instance View (LocatedA (HsExpr GhcPs)) LamConst1 where
+   view (fromParen -> (L _ (HsLam _ _ (MG FromSource (L _ [L _ (Match _ (LamAlt _) (L _ [L _ WildPat {}])
+-    (GRHSs _ [L _ (GRHS _ [] x)] ((EmptyLocalBinds _))))]))))) = LamConst1 x
++    (GRHSs _ (L _ (GRHS _ [] x) :| []) ((EmptyLocalBinds _))))]))))) = LamConst1 x
+   view _ = NoLamConst1
+ 
+ instance View (LocatedA (HsExpr GhcPs)) RdrName_ where
+@@ -54,7 +55,7 @@ instance View (LocatedA (Pat GhcPs)) PVar_ where
+   view _ = NoPVar_
+ 
+ instance View (LocatedA (Pat GhcPs)) PApp_ where
+-  view (fromPParen -> L _ (ConPat _ (L _ x) (PrefixCon _ args))) =
++  view (fromPParen -> L _ (ConPat _ (L _ x) (PrefixCon args))) =
+     PApp_ (occNameStr x) args
+   view (fromPParen -> L _ (ConPat _ (L _ x) (InfixCon lhs rhs))) =
+     PApp_ (occNameStr x) [lhs, rhs]
+@@ -62,4 +63,4 @@ instance View (LocatedA (Pat GhcPs)) PApp_ where
+ 
+ -- A lambda with no guards and no where clauses
+ pattern SimpleLambda :: [LocatedA (Pat GhcPs)] -> LocatedA (HsExpr GhcPs) -> LocatedA (HsExpr GhcPs)
+-pattern SimpleLambda vs body <- L _ (HsLam _ LamSingle (MG _ (L _ [L _ (Match _ _ (L _ vs) (GRHSs _ [L _ (GRHS _ [] body)] ((EmptyLocalBinds _))))])))
++pattern SimpleLambda vs body <- L _ (HsLam _ LamSingle (MG _ (L _ [L _ (Match _ _ (L _ vs) (GRHSs _ (L _ (GRHS _ [] body) :| []) ((EmptyLocalBinds _))))])))
+diff --git a/src/Hint/Bracket.hs b/src/Hint/Bracket.hs
+index 7ecce26..307907d 100644
+--- a/src/Hint/Bracket.hs
++++ b/src/Hint/Bracket.hs
+@@ -245,24 +245,14 @@ bracketError :: (Outputable a, Outputable b, Brackets (LocatedA b)) => String ->
+ bracketError msg o x =
+   warn msg (reLoc o) (reLoc x) [Replace (findType x) (toSSA o) [("x", toSSA x)] "x"]
+ 
+-fieldDecl ::  LConDeclField GhcPs -> [Idea]
+-fieldDecl o@(L loc f@ConDeclField{cd_fld_type=v@(L l (HsParTy _ c))}) =
+-   let r = L loc (f{cd_fld_type=c}) :: LConDeclField GhcPs in
++fieldDecl ::  LHsConDeclRecField GhcPs -> [Idea]
++fieldDecl o@(L loc f@HsConDeclRecField{cdrf_spec = CDF{cdf_bang = NoSrcStrict, cdf_type = v@(L l (HsParTy _ c))}}) =
++    let r = L loc (f{cdrf_spec = (cdrf_spec f){cdf_type = c}}) :: LHsConDeclRecField GhcPs in
+    [rawIdea Suggestion "Redundant bracket" (locA l)
+-    (showSDocUnsafe $ ppr_fld o) -- Note this custom printer!
+-    (Just (showSDocUnsafe $ ppr_fld r))
++    (showSDocUnsafe $ ppr o)
++    (Just (showSDocUnsafe $ ppr r))
+     []
+     [Replace Type (toSSA v) [("x", toSSA c)] "x"]]
+-   where
+-     -- If we call 'unsafePrettyPrint' on a field decl, we won't like
+-     -- the output (e.g. "[foo, bar] :: T"). Here we use a custom
+-     -- printer to work around (snarfed from Hs.Types.pprConDeclFields)
+-     ppr_fld (L _ ConDeclField { cd_fld_names = ns, cd_fld_type = ty, cd_fld_doc = doc })
+-       = pprMaybeWithDoc doc (ppr_names ns <+> dcolon <+> ppr ty)
+-     ppr_fld (L _ (XConDeclField x)) = ppr x
+-
+-     ppr_names [n] = ppr n
+-     ppr_names ns = sep (punctuate comma (map ppr ns))
+ fieldDecl _ = []
+ 
+ -- This function relies heavily on fixities having been applied to the
+diff --git a/src/Hint/Lambda.hs b/src/Hint/Lambda.hs
+index dbdb141..a224d09 100644
+--- a/src/Hint/Lambda.hs
++++ b/src/Hint/Lambda.hs
+@@ -110,7 +110,9 @@ module Hint.Lambda(lambdaHint) where
+ 
+ import Hint.Type (DeclHint, Idea, Note(RequiresExtension), suggest, warn, toSS, toSSA, suggestN, ideaNote, substVars, toRefactSrcSpan)
+ import Util
++import Data.List qualified
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..))
+ import Data.Set (Set)
+ import Data.Set qualified as Set
+ import Refact.Types hiding (Match)
+@@ -149,7 +151,7 @@ lambdaBind :: LHsBind GhcPs -> RType -> [Idea]
+ lambdaBind
+     o@(L _ origBind@FunBind {fun_id = funName@(L loc1 _), fun_matches =
+         MG {mg_alts =
+-            L _ [L _ (Match _ ctxt@(FunRhs _ Prefix _ _) (L _ pats) (GRHSs _ [L _ (GRHS _ [] origBody@(L loc2 _))] bind))]}}) rtype
++            L _ [L _ (Match _ ctxt@(FunRhs _ Prefix _ _) (L _ pats) (GRHSs _ (L _ (GRHS _ [] origBody@(L loc2 _)) :| []) bind))]}}) rtype
+     | EmptyLocalBinds _ <- bind
+     , isLambda $ fromParen origBody
+     , null (universeBi pats :: [HsExpr GhcPs])
+@@ -172,7 +174,7 @@ lambdaBind
+     where
+           reform :: [LPat GhcPs] -> LHsExpr GhcPs -> Located (HsDecl GhcPs)
+           reform ps b = L (combineSrcSpans (locA loc1) (locA loc2)) $ ValD noExtField $
+-             origBind {fun_matches = MG (Generated OtherExpansion SkipPmc) (noLocA [noLocA $ Match noExtField ctxt (L noSpanAnchor ps) $ GRHSs emptyComments [noLocA $ GRHS noAnn [] b] $ EmptyLocalBinds noExtField])}
++             origBind {fun_matches = MG (Generated OtherExpansion SkipPmc) (noLocA [noLocA $ Match noExtField ctxt (L noSpanAnchor ps) $ GRHSs emptyComments (noLocA (GRHS noAnn [] b) :| []) $ EmptyLocalBinds noExtField])}
+ 
+           mkSubtsAndTpl newPats newBody = (sub, tpl)
+             where
+@@ -334,7 +336,7 @@ fromLambda x = ([], x)
+ mkOrigPats :: Maybe String -> [LPat GhcPs] -> ([LPat GhcPs], [String])
+ mkOrigPats funName pats = (zipWith munge vars pats', vars)
+   where
+-    (Set.unions -> used, pats') = unzip (map f pats)
++    (Set.unions -> used, pats') = Data.List.unzip (map f pats)
+ 
+     -- Remove variables that occur in the function name or patterns with wildcards
+     vars = filter (\s -> s `Set.notMember` used && Just s /= funName) substVars
+diff --git a/src/Hint/ListRec.hs b/src/Hint/ListRec.hs
+index 53c0e62..c75d98f 100644
+--- a/src/Hint/ListRec.hs
++++ b/src/Hint/ListRec.hs
+@@ -35,6 +35,7 @@ import Hint.Type (DeclHint, Severity(Suggestion, Warning), idea, toSSA)
+ 
+ import Data.Generics.Uniplate.DataOnly
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..))
+ import Data.Maybe
+ import Data.Either.Extra
+ import Control.Monad
+@@ -140,7 +141,7 @@ asDo (view ->
+                  L _ Match {  m_ctxt=(LamAlt LamSingle)
+                             , m_pats=L _ [v@(L _ VarPat{})]
+                             , m_grhss=GRHSs _
+-                                        [L _ (GRHS _ [] rhs)]
++                                        (L _ (GRHS _ [] rhs) :| [])
+                                         (EmptyLocalBinds _)}]}))
+       ) =
+   [ noLocA $ BindStmt noAnn v lhs
+@@ -174,7 +175,7 @@ findCase x = do
+   let ps12 = let (a, b) = splitAt p1 ps1 in map strToPat (a ++ xs : b) -- Function arguments.
+       emptyLocalBinds = EmptyLocalBinds noExtField :: HsLocalBindsLR GhcPs GhcPs -- Empty where clause.
+       gRHS e = noLocA $ GRHS noAnn [] e :: LGRHS GhcPs (LHsExpr GhcPs) -- Guarded rhs.
+-      gRHSSs e = GRHSs emptyComments [gRHS e] emptyLocalBinds -- Guarded rhs set.
++      gRHSSs e = GRHSs emptyComments (gRHS e :| []) emptyLocalBinds -- Guarded rhs set.
+       match e = Match{m_ext=noExtField,m_pats=noLocA ps12, m_grhss=gRHSSs e, ..} -- Match.
+       matchGroup e = MG{mg_alts=noLocA [noLocA $ match e], mg_ext=Generated OtherExpansion SkipPmc, ..} -- Match group.
+       funBind e = FunBind {fun_matches=matchGroup e, ..} :: HsBindLR GhcPs GhcPs -- Fun bind.
+@@ -208,7 +209,7 @@ findBranch (L _ x) = do
+   Match { m_ctxt = FunRhs {mc_fun=(L _ name)}
+             , m_pats = ps
+             , m_grhss =
+-              GRHSs {grhssGRHSs=[L l (GRHS _ [] body)]
++              GRHSs {grhssGRHSs=(L l (GRHS _ [] body) :| [])
+                         , grhssLocalBinds=EmptyLocalBinds _
+                         }
+             } <- pure x
+@@ -227,6 +228,6 @@ readPat :: LPat GhcPs -> Maybe (Either String BList)
+ readPat (view -> PVar_ x) = Just $ Left x
+ readPat (L _ (ParPat _ (L _ (ConPat _ (L _ n) (InfixCon (view -> PVar_ x) (view -> PVar_ xs))))))
+  | n == consDataCon_RDR = Just $ Right $ BCons x xs
+-readPat (L _ (ConPat _ (L _ n) (PrefixCon [] [])))
++readPat (L _ (ConPat _ (L _ n) (PrefixCon [])))
+   | n == nameRdrName nilDataConName = Just $ Right BNil
+ readPat _ = Nothing
+diff --git a/src/Hint/Monad.hs b/src/Hint/Monad.hs
+index 07a1198..648ddf4 100644
+--- a/src/Hint/Monad.hs
++++ b/src/Hint/Monad.hs
+@@ -89,6 +89,7 @@ import Data.Generics.Uniplate.DataOnly
+ import Data.Tuple.Extra
+ import Data.Maybe
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..))
+ import Refact.Types hiding (Match)
+ import Refact.Types qualified as R
+ 
+@@ -295,7 +296,7 @@ monadLet xs = mapMaybe mkLet xs
+     template lhs rhs =
+         let p = noLocA $ mkRdrUnqual (mkVarOcc lhs)
+             grhs = noLocA (GRHS noAnn [] rhs)
+-            grhss = GRHSs emptyComments [grhs] (EmptyLocalBinds noExtField)
++            grhss = GRHSs emptyComments (grhs :| []) (EmptyLocalBinds noExtField)
+             match = noLocA $ Match noExtField (FunRhs p Prefix NoSrcStrict noAnn) (noLocA []) grhss
+             fb = noLocA $ FunBind noExtField p (MG (Generated OtherExpansion SkipPmc) (noLocA [match]))
+             binds = [fb]
+diff --git a/src/Hint/Naming.hs b/src/Hint/Naming.hs
+index 78d0d7e..2169d79 100644
+--- a/src/Hint/Naming.hs
++++ b/src/Hint/Naming.hs
+@@ -90,12 +90,12 @@ shorten :: LHsDecl GhcPs -> LHsDecl GhcPs
+ shorten (L locDecl (ValD ttg0 bind@(FunBind _ _ matchGroup@(MG FromSource (L locMatches matches))))) =
+     L locDecl (ValD ttg0 bind {fun_matches = matchGroup {mg_alts = L locMatches $ map shortenMatch matches}})
+ shorten (L locDecl (ValD ttg0 bind@(PatBind _ _ _ grhss@(GRHSs _ rhss _)))) =
+-    L locDecl (ValD ttg0 bind {pat_rhs = grhss {grhssGRHSs = map shortenLGRHS rhss}})
++    L locDecl (ValD ttg0 bind {pat_rhs = grhss {grhssGRHSs = fmap shortenLGRHS rhss}})
+ shorten x = x
+ 
+ shortenMatch :: LMatch GhcPs (LHsExpr GhcPs) -> LMatch GhcPs (LHsExpr GhcPs)
+ shortenMatch (L locMatch match@(Match _ _ _ grhss@(GRHSs _ rhss _))) =
+-    L locMatch match {m_grhss = grhss {grhssGRHSs = map shortenLGRHS rhss}}
++    L locMatch match {m_grhss = grhss {grhssGRHSs = fmap shortenLGRHS rhss}}
+ 
+ shortenLGRHS :: LGRHS GhcPs (LHsExpr GhcPs) -> LGRHS GhcPs (LHsExpr GhcPs)
+ shortenLGRHS (L locGRHS (GRHS ttg0 guards (L locExpr _))) =
+diff --git a/src/Hint/NewType.hs b/src/Hint/NewType.hs
+index d06be1a..6dcf0e6 100644
+--- a/src/Hint/NewType.hs
++++ b/src/Hint/NewType.hs
+@@ -57,7 +57,7 @@ newtypeHintDecl :: LHsDecl GhcPs -> [Idea]
+ newtypeHintDecl old
+     | Just WarnNewtype{newDecl, insideType} <- singleSimpleField old
+     = [(suggestN "Use newtype instead of data" (reLoc old) (reLoc newDecl))
+-            {ideaNote = [DecreasesLaziness | warnBang insideType]}]
++            {ideaNote = [DecreasesLaziness | warnBang old]}]
+ newtypeHintDecl _ = []
+ 
+ newTypeDerivingStrategiesHintDecl :: LHsDecl GhcPs -> [Idea]
+@@ -135,24 +135,29 @@ simpleHsDataDefn _ = Nothing
+ -- | Checks whether its argument is a \"simple\" constructor (see criteria in 'singleSimpleField')
+ -- returning the type inside the constructor if it is. This is needed for strictness analysis.
+ simpleCons :: ConDecl GhcPs -> Maybe (HsType GhcPs)
+-simpleCons (ConDeclH98 _ _ _ [] context (PrefixCon [] [HsScaled _ (L _ inType)]) _)
+-    | emptyOrNoContext context
+-    , not $ isUnboxedTuple inType
+-    , not $ isHashy inType
+-    = Just inType
+-simpleCons (ConDeclH98 _ _ _ [] context (RecCon (L _ [L _ (ConDeclField _ [_] (L _ inType) _)])) _)
+-    | emptyOrNoContext context
+-    , not $ isUnboxedTuple inType
+-    , not $ isHashy inType
+-    = Just inType
++simpleCons (ConDeclH98 _ _ _ [] context (PrefixCon [CDF { cdf_type=(L _ inType) }]) _)
++     | emptyOrNoContext context
++     , not $ isUnboxedTuple inType
++     , not $ isHashy inType
++     = Just inType
++simpleCons (ConDeclH98 _ _ _ [] context (RecCon (L _ [L _ (HsConDeclRecField {cdrf_names=[_], cdrf_spec=CDF{ cdf_type=(L _ inType)}})])) _)
++     | emptyOrNoContext context
++     , not $ isUnboxedTuple inType
++     , not $ isHashy inType
++     = Just inType
+ simpleCons _ = Nothing
+ 
+ isHashy :: HsType GhcPs -> Bool
+ isHashy x = or ["#" `isSuffixOf` unsafePrettyPrint v | v@HsTyVar{} <- universe x]
+ 
+-warnBang :: HsType GhcPs -> Bool
+-warnBang (HsBangTy _ (HsBang _ SrcStrict) _) = False
+-warnBang _ = True
++warnBang :: LHsDecl GhcPs -> Bool
++warnBang (L _ (TyClD _ (DataDecl _ _ _ _ (HsDataDefn _ _ _ _ (DataTypeCons _ [L _ constructor]) _)))) = warnBangCtor constructor
++warnBang (L _ (InstD _ (DataFamInstD _ (DataFamInstDecl (FamEqn _ _ _ _ _ (HsDataDefn _ _ _ _ (DataTypeCons _ [L _ constructor]) _)))))) = warnBangCtor constructor
++warnBang _ = False
++
++warnBangCtor (ConDeclH98 _ _ _ [] context (PrefixCon [CDF { cdf_bang = SrcStrict }]) _) = True
++warnBangCtor (ConDeclH98 _ _ _ [] context (RecCon (L _ [L _ (HsConDeclRecField { cdrf_spec=CDF{ cdf_bang = SrcStrict }})])) _) = True
++warnBangCtor _ = False
+ 
+ emptyOrNoContext :: Maybe (LHsContext GhcPs) -> Bool
+ emptyOrNoContext Nothing = True
+@@ -161,20 +166,14 @@ emptyOrNoContext _ = False
+ 
+ -- | The \"Bang\" here refers to 'HsSrcBang', which notably also includes @UNPACK@ pragmas!
+ dropConsBang :: ConDecl GhcPs -> ConDecl GhcPs
+--- fields [HsScaled GhcPs (LBangType GhcPs)]
+-dropConsBang decl@(ConDeclH98 _ _ _ _ _ (PrefixCon [] fields) _) =
+-    -- decl {con_args = PrefixCon $ map getBangType fields}
+-    let fs' = map (\(HsScaled s lt) -> HsScaled s (getBangType lt)) fields  :: [HsScaled GhcPs (LBangType GhcPs)]
+-    in decl {con_args = PrefixCon [] fs'}
++dropConsBang decl@(ConDeclH98 _ _ _ _ _ (PrefixCon fields) _) =
++    let fs' = map(\f -> f{cdf_unpack=NoSrcUnpack, cdf_bang=NoSrcStrict}) fields
++    in decl {con_args = PrefixCon fs'}
+ dropConsBang decl@(ConDeclH98 _ _ _ _ _ (RecCon (L recloc conDeclFields)) _) =
+-    decl {con_args = RecCon $ L recloc $ removeUnpacksRecords conDeclFields}
+-    where
+-        removeUnpacksRecords :: [LConDeclField GhcPs] -> [LConDeclField GhcPs]
+-        removeUnpacksRecords = map (\(L conDeclFieldLoc x) -> L conDeclFieldLoc $ removeConDeclFieldUnpacks x)
+-
+-        removeConDeclFieldUnpacks :: ConDeclField GhcPs -> ConDeclField GhcPs
+-        removeConDeclFieldUnpacks conDeclField@(ConDeclField _ _ fieldType _) =
+-            conDeclField {cd_fld_type = getBangType fieldType}
++  decl {con_args = RecCon $ L recloc $ removeUnpacksRecords conDeclFields}
++     where
++         removeUnpacksRecords :: [LHsConDeclRecField GhcPs] -> [LHsConDeclRecField GhcPs]
++         removeUnpacksRecords =  map (\(L loc f) -> L loc (f{cdrf_spec=(cdrf_spec f){cdf_unpack=NoSrcUnpack, cdf_bang=NoSrcStrict}}))
+ dropConsBang x = x
+ 
+ isUnboxedTuple :: HsType GhcPs -> Bool
+diff --git a/src/Hint/Pattern.hs b/src/Hint/Pattern.hs
+index 1b64254..b84ac3f 100644
+--- a/src/Hint/Pattern.hs
++++ b/src/Hint/Pattern.hs
+@@ -62,14 +62,16 @@ module Hint.Pattern(patternHint) where
+ import Hint.Type(DeclHint,Idea,modComments,firstDeclComments,ideaTo,toSSA,toRefactSrcSpan,suggest,suggestRemove,warn)
+ import Data.Generics.Uniplate.DataOnly
+ import Data.Function
++import Data.List qualified
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..), fromList, toList)
+ import Data.Tuple
+ import Data.Maybe
+ import Data.Either
+ import Refact.Types hiding (RType(Pattern, Match), SrcSpan)
+ import Refact.Types qualified as R (RType(Pattern, Match), SrcSpan)
+ 
+-import GHC.Hs hiding(asPattern)
++import GHC.Hs hiding (asPattern)
+ import GHC.Types.SrcLoc
+ import GHC.Types.Name.Reader
+ import GHC.Types.Name.Occurrence
+@@ -116,8 +118,8 @@ hints gen (Pattern pats (GuardedRhss _ [GuardedRhs _ [Generator _ pat (App _ op
+ -}
+ 
+ hints :: (String -> Pattern -> [Refactoring R.SrcSpan] -> Idea) -> Pattern -> [Idea]
+-hints gen (Pattern l rtype pat (GRHSs _ [L _ (GRHS _ [] bod)] bind))
+-  | length guards > 2 = [gen "Use guards" (Pattern l rtype pat (GRHSs emptyComments guards bind)) [refactoring]]
++hints gen (Pattern l rtype pat (GRHSs _ (L _ (GRHS _ [] bod) :| []) bind))
++  | length guards > 2 = [gen "Use guards" (Pattern l rtype pat (GRHSs emptyComments (fromList guards) bind)) [refactoring]]
+   where
+     rawGuards :: [(LHsExpr GhcPs, LHsExpr GhcPs)]
+     rawGuards = asGuards bod
+@@ -128,7 +130,7 @@ hints gen (Pattern l rtype pat (GRHSs _ [L _ (GRHS _ [] bod)] bind))
+     guards :: [LGRHS GhcPs (LHsExpr GhcPs)]
+     guards = map (noLocA . uncurry mkGuard) rawGuards
+ 
+-    (lhs, rhs) = unzip rawGuards
++    (lhs, rhs) = Data.List.unzip rawGuards
+ 
+     mkTemplate c ps =
+       -- Check if the expression has been injected or is natural.
+@@ -150,14 +152,14 @@ hints gen (Pattern l rtype pat (GRHSs _ [L _ (GRHS _ [] bod)] bind))
+     toString' (Left e) = e
+     toString' (Right (v, _)) = strToPat v
+ 
+-    template = fromMaybe "" $ ideaTo (gen "" (Pattern l rtype (map toString' patSubts) (GRHSs emptyComments templateGuards bind)) [])
++    template = fromMaybe "" $ ideaTo (gen "" (Pattern l rtype (map toString' patSubts) (GRHSs emptyComments (fromList templateGuards) bind)) [])
+ 
+     f :: [Either a (String, R.SrcSpan)] -> [(String, R.SrcSpan)]
+     f = rights
+     refactoring = Replace rtype (toRefactSrcSpan l) (f patSubts ++ f guardSubts ++ f exprSubts) template
+-hints gen (Pattern l t pats o@(GRHSs _ [L _ (GRHS _ [test] bod)] bind))
++hints gen (Pattern l t pats o@(GRHSs _ (L _ (GRHS _ [test] bod) :| []) bind))
+   | unsafePrettyPrint test `elem` ["otherwise", "True"]
+-  = [gen "Redundant guard" (Pattern l t pats o{grhssGRHSs=[noLocA (GRHS noAnn [] bod)]}) [Delete Stmt (toSSA test)]]
++  = [gen "Redundant guard" (Pattern l t pats o{grhssGRHSs=noLocA (GRHS noAnn [] bod) :| []}) [Delete Stmt (toSSA test)]]
+ hints _ (Pattern l t pats bod@(GRHSs _ _ binds)) | f binds
+   = [suggestRemove "Redundant where" whereSpan "where" [ {- TODO refactoring for redundant where -} ]]
+   where
+@@ -171,10 +173,10 @@ hints _ (Pattern l t pats bod@(GRHSs _ _ binds)) | f binds
+         let end = realSrcSpanEnd s
+             start = mkRealSrcLoc (srcSpanFile s) (srcLocLine end) (srcLocCol end - 5)
+          in RealSrcSpan (mkRealSrcSpan start end) GHC.Data.Strict.Nothing
+-hints gen (Pattern l t pats o@(GRHSs _ (unsnoc -> Just (gs, L _ (GRHS _ [test] bod))) binds))
++hints gen (Pattern l t pats o@(GRHSs _ (unsnoc . toList -> Just (gs, L _ (GRHS _ [test] bod))) binds))
+   | unsafePrettyPrint test == "True"
+   = let otherwise_ = noLocA $ BodyStmt noExtField (strToVar "otherwise") noSyntaxExpr noSyntaxExpr in
+-      [gen "Use otherwise" (Pattern l t pats o{grhssGRHSs = gs ++ [noLocA (GRHS noAnn [otherwise_] bod)]}) [Replace Expr (toSSA test) [] "otherwise"]]
++      [gen "Use otherwise" (Pattern l t pats o{grhssGRHSs = fromList (gs ++ [noLocA (GRHS noAnn [otherwise_] bod)])}) [Replace Expr (toSSA test) [] "otherwise"]]
+ hints _ _ = []
+ 
+ asGuards :: LHsExpr GhcPs -> [(LHsExpr GhcPs, LHsExpr GhcPs)]
+@@ -199,7 +201,7 @@ asPattern (L loc x) = concatMap decl (universeBi x)
+ -- First Bool is if 'Strict' is a language extension. Second Bool is
+ -- if this pattern in this context is going to be evaluated strictly.
+ patHint :: Bool -> Bool -> LPat GhcPs -> [Idea]
+-patHint _ _ o@(L _ (ConPat _ name (PrefixCon _ args)))
++patHint _ _ o@(L _ (ConPat _ name (PrefixCon args)))
+   | length args >= 3 && all isPWildcard args =
+   let rec_fields = HsRecFields noExtField [] Nothing :: HsRecFields GhcPs (LPat GhcPs)
+       new        = noLocA $ ConPat noAnn name (RecCon rec_fields) :: LPat GhcPs
+@@ -238,11 +240,11 @@ patHint _ _ _ = []
+ 
+ expHint :: LHsExpr GhcPs -> [Idea]
+  -- Note the 'FromSource' in these equations (don't warn on generated match groups).
+-expHint o@(L _ (HsCase _ _ (MG FromSource (L _ [L _ (Match _ CaseAlt (L _ [L _ (WildPat _)]) (GRHSs _ [L _ (GRHS _ [] e)] (EmptyLocalBinds _))) ])))) =
++expHint o@(L _ (HsCase _ _ (MG FromSource (L _ [L _ (Match _ CaseAlt (L _ [L _ (WildPat _)]) (GRHSs _ (L _ (GRHS _ [] e) :| []) (EmptyLocalBinds _))) ])))) =
+   [suggest "Redundant case" (reLoc o) (reLoc e) [r]]
+   where
+     r = Replace Expr (toSSA o) [("x", toSSA e)] "x"
+-expHint o@(L _ (HsCase _ (L _ (HsVar _ (L _ x))) (MG FromSource (L _ [L _ (Match _ CaseAlt (L _ [L _ (VarPat _ (L _ y))]) (GRHSs _ [L _ (GRHS _ [] e)] (EmptyLocalBinds _))) ]))))
++expHint o@(L _ (HsCase _ (L _ (HsVar _ (L _ x))) (MG FromSource (L _ [L _ (Match _ CaseAlt (L _ [L _ (VarPat _ (L _ y))]) (GRHSs _ (L _ (GRHS _ [] e) :| []) (EmptyLocalBinds _))) ]))))
+   | occNameStr x == occNameStr y =
+       [suggest "Redundant case" (reLoc o) (reLoc e) [r]]
+   where
+diff --git a/src/Hint/Smell.hs b/src/Hint/Smell.hs
+index 780923c..06f9c72 100644
+--- a/src/Hint/Smell.hs
++++ b/src/Hint/Smell.hs
+@@ -81,6 +81,7 @@ import Config.Type
+ 
+ import Data.Generics.Uniplate.DataOnly
+ import Data.List.Extra
++import Data.List.NonEmpty(NonEmpty(..))
+ import Data.Map qualified as Map
+ 
+ import GHC.Utils.Outputable
+@@ -132,7 +133,7 @@ declSpans
+                    mg_ext=FromSource
+                  , mg_alts=(L _ [L _ Match {
+                        m_ctxt=ctx
+-                     , m_grhss=GRHSs{grhssGRHSs=[locGrhs]
++                     , m_grhss=GRHSs{grhssGRHSs=(locGrhs :| [])
+                                  , grhssLocalBinds=where_}}])}})) =
+  -- The span of the right hand side and the spans of each binding in
+  -- the where clause.
